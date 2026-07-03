@@ -121,4 +121,4 @@ async def removepoints(
     except:
         await interaction.followup.send("⚠️ Could not DM user.", ephemeral=True)
 # ---------------- FIX #3: TOKEN SAFETY ----------------
-bot.run("MTUyMjQxMjQ2MjQ2NzcxMTA3OA.Gqih9M.eLLXcU5eYKNmhgXiXtOKjRaP5UJ2TCePsgqb50")
+bot.run(MTUyMjQxMjQ2MjQ2NzcxMTA3OA.GjHqTF.IH7djS-BwEIDrsOIBCBxdfIQS6UPTZnhM47Pcw)
