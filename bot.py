@@ -1,124 +1,313 @@
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+
 import os
 import sqlite3
-import discord
-from dotenv import load_dotenv
-from discord.ext import commands
-from discord import app_commands
+import re
+from datetime import datetime
 
-# Load token
+
+# =========================
+# CONFIG
+# =========================
+
 load_dotenv()
+
 TOKEN = os.getenv("TOKEN")
 
-# Database
-conn = sqlite3.connect("points.db")
-c = conn.cursor()
-c.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)")
-conn.commit()
 
-def ensure(i):
-    c.execute("INSERT OR IGNORE INTO users(id, points) VALUES(?, 0)", (i,))
-    conn.commit()
+# PUT YOUR CHANNEL IDS HERE
+GUILD_CHANNELS = {
+    1530941934753812651: "Guild 1",
+    1530941966836043836: "Guild 2",
+    1530942152690110565: "Guild 3",
+    1530942182888837341: "Guild 4",
+    1530942213612372038: "Guild 5",
+    1531199068603154489: "Guild 6",
+    1531856633439977532: "Guild 7",
+    1532940571415679067: "Guild 8",
+    1533320919500455996: "Guild 9",
+}
 
-def pts(i):
-    ensure(i)
-    return c.execute("SELECT points FROM users WHERE id=?", (i,)).fetchone()[0]
 
-def add(i, a):
-    ensure(i)
-    c.execute("UPDATE users SET points = points + ? WHERE id=?", (a, i))
-    conn.commit()
+# PUT TRACKER CHANNEL ID HERE
+TRACKER_CHANNEL_ID = 1532339634829267149
 
-# ---------------- FIX #1: INTENTS ----------------
+
+# =========================
+# DATABASE
+# =========================
+
+db = sqlite3.connect("donations.db")
+cursor = db.cursor()
+
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS donations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild TEXT,
+    ign TEXT,
+    previous_gold TEXT,
+    current_gold TEXT,
+    donation INTEGER,
+    logged_by TEXT,
+    time TEXT
+)
+""")
+
+db.commit()
+
+
+def save_donation(
+    guild,
+    ign,
+    previous,
+    current,
+    donation,
+    logged_by,
+    time
+):
+
+    cursor.execute("""
+    INSERT INTO donations
+    (
+        guild,
+        ign,
+        previous_gold,
+        current_gold,
+        donation,
+        logged_by,
+        time
+    )
+    VALUES (?,?,?,?,?,?,?)
+    """,
+    (
+        guild,
+        ign,
+        previous,
+        current,
+        donation,
+        logged_by,
+        time
+    ))
+
+    db.commit()
+
+
+
+# =========================
+# NUMBER CONVERTER
+# =========================
+
+def convert_amount(value):
+
+    value = value.upper().replace(",", "")
+
+    try:
+
+        if "M" in value:
+            return int(float(value.replace("M","")) * 1000000)
+
+        if "K" in value:
+            return int(float(value.replace("K","")) * 1000)
+
+        return int(value)
+
+    except:
+        return 0
+
+
+
+# =========================
+# BOT SETUP
+# =========================
+
+
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------- FIX #2: SYNC PROPERLY ----------------
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
+
+
+
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
-    print("Slash commands synced")
 
-# ---------------- COMMANDS ----------------
-
-@bot.tree.command(name="points", description="Check a user's points")
-async def points(interaction: discord.Interaction, user: discord.Member = None):
-
-    # If no user is mentioned, check yourself
-    if user is None:
-        user = interaction.user
-
-    total = pts(user.id)
-
-    await interaction.response.send_message(
-        f"💰 {user.mention} has **{total} points**."
-    )
-@bot.tree.command(name="leaderboard", description="Top users")
-async def leaderboard(interaction: discord.Interaction):
-    rows = c.execute("SELECT id, points FROM users ORDER BY points DESC LIMIT 10").fetchall()
-
-    txt = ""
-    for n, (uid, p) in enumerate(rows, 1):
-        try:
-            user = await bot.fetch_user(uid)
-            txt += f"{n}. {user.name}: {p}\n"
-        except:
-            txt += f"{n}. Unknown User ({uid}): {p}\n"
-
-    await interaction.response.send_message(txt or "No data yet")
-
-@bot.tree.command(name="givepoints", description="Admin gives points")
-@app_commands.checks.has_permissions(administrator=True)
-async def givepoints(
-    interaction: discord.Interaction,
-    user: discord.Member,
-    amount: int,
-    reason: str
-):
-
-    add(user.id, amount)
-    new_total = pts(user.id)
-
-    await interaction.response.send_message(
-        f"✅ Added **{amount} points** to {user.mention}\n📌 Reason: {reason}"
+    print(
+        f"Logged in as {bot.user}"
     )
 
-    try:
-        await user.send(
-            f"🎉 **Points Awarded!**\n"
-            f"You have been awarded **{amount} training points** by **{interaction.user.name}**.\n"
-            f"📌 Reason: {reason}\n"
-            f"💰 New Total: {new_total}"
+
+
+# =========================
+# MESSAGE READER
+# =========================
+
+
+@bot.event
+async def on_message(message):
+
+    await bot.process_commands(message)
+
+
+    # ignore bots
+    if message.author.bot:
+        return
+
+
+    # only watch guild channels
+    if message.channel.id not in GUILD_CHANNELS:
+        return
+
+
+    text = message.content
+
+
+    # find values
+
+    ign = re.search(
+        r"IGN:\s*(.+)",
+        text
+    )
+
+    previous = re.search(
+        r"Previous Guild Gold:\s*(.+)",
+        text
+    )
+
+    current = re.search(
+        r"Current Guild Gold:\s*(.+)",
+        text
+    )
+
+    donation = re.search(
+        r"Daily Donation:\s*(.+)",
+        text
+    )
+
+
+    # if not a donation log
+    if not ign or not donation:
+        return
+
+
+
+    ign = ign.group(1).strip()
+
+    previous = (
+        previous.group(1).strip()
+        if previous
+        else "Unknown"
+    )
+
+    current = (
+        current.group(1).strip()
+        if current
+        else "Unknown"
+    )
+
+    donation_text = donation.group(1).strip()
+
+    donation_number = convert_amount(
+        donation_text
+    )
+
+
+    guild_name = GUILD_CHANNELS[
+        message.channel.id
+    ]
+
+
+    time = datetime.now().strftime(
+        "%d/%m/%Y %I:%M %p"
+    )
+
+
+    save_donation(
+        guild_name,
+        ign,
+        previous,
+        current,
+        donation_number,
+        message.author.display_name,
+        time
+    )
+
+
+
+    # SEND TRACKER MESSAGE
+
+    tracker = bot.get_channel(
+        TRACKER_CHANNEL_ID
+    )
+
+
+    if tracker:
+
+
+        embed = discord.Embed(
+            title="💰 Guild Donation Logged",
+            color=discord.Color.green()
         )
-    except:
-        await interaction.followup.send("⚠️ Could not DM user.", ephemeral=True)
-@bot.tree.command(name="removepoints", description="Admin removes points")
-@app_commands.checks.has_permissions(administrator=True)
-async def removepoints(
-    interaction: discord.Interaction,
-    user: discord.Member,
-    amount: int,
-    reason: str
-):
 
-    add(user.id, -amount)
-    new_total = pts(user.id)
 
-    await interaction.response.send_message(
-        f"⚠️ Removed **{amount} points** from {user.mention}\n📌 Reason: {reason}"
-    )
-
-    try:
-        await user.send(
-            f"⚠️ **Points Removed**\n"
-            f"**{amount} training points** were removed by **{interaction.user.name}**.\n"
-            f"📌 Reason: {reason}\n"
-            f"💰 New Total: {new_total}"
+        embed.add_field(
+            name="Guild",
+            value=guild_name,
+            inline=False
         )
-    except:
-        await interaction.followup.send("⚠️ Could not DM user.", ephemeral=True)
-# ---------------- FIX #3: TOKEN SAFETY ----------------
+
+
+        embed.add_field(
+            name="IGN",
+            value=ign,
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="Previous Gold",
+            value=previous
+        )
+
+
+        embed.add_field(
+            name="Current Gold",
+            value=current
+        )
+
+
+        embed.add_field(
+            name="Daily Donation",
+            value=f"{donation_text} ({donation_number:,})",
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="Logged By",
+            value=message.author.mention
+        )
+
+
+        embed.set_footer(
+            text=time
+        )
+
+
+        await tracker.send(
+            embed=embed
+        )
+
+
+
+# =========================
+# START
+# =========================
+
 bot.run(TOKEN)
