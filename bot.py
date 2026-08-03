@@ -282,17 +282,11 @@ bot = commands.Bot(
 @bot.event
 async def on_ready():
 
-    print(
-        f"Logged in as {bot.user}"
-    )
+    print(f"Logged in as {bot.user}")
 
+    synced = await bot.tree.sync()
 
-    await bot.tree.sync()
-
-
-    print(
-        "Commands synced"
-    )
+    print(f"Synced {len(synced)} commands")
 
 
 
