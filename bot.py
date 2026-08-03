@@ -21,6 +21,7 @@ TOKEN = os.getenv("TOKEN")
 
 SERVER_ID = 1529030570410119259
 
+# Every 100K = 1 covered day
 DAILY_REQUIREMENT = 100_000
 
 
@@ -121,50 +122,172 @@ db.commit()
 
 
 # =========================================================
-# GLOBAL TIME
+# TIME FUNCTIONS
 # =========================================================
 
 def get_now():
-    return datetime.now(timezone.utc)
+
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def get_today():
+
     return get_now().date().isoformat()
 
 
 def get_timestamp():
-    return int(get_now().timestamp())
+
+    return int(
+        get_now().timestamp()
+    )
 
 
 # =========================================================
-# NAME FUNCTIONS
+# NAME MATCHING
 # =========================================================
 
 def normalize_name(name):
-    return (
-        name.strip()
-        .lower()
-        .replace(" ", "")
-    )
+
+    """
+    Basic normalized version.
+
+    Example:
+    Chicken (@Kimoy)
+    becomes:
+    chickenkimoy
+    """
+
+    if not name:
+        return ""
+
+    return re.sub(
+        r"[^a-zA-Z0-9]",
+        "",
+        name
+    ).lower()
 
 
 def get_member_names(member):
 
-    names = {
-        normalize_name(member.display_name),
-        normalize_name(member.name),
-    }
+    names = set()
 
-    if member.global_name:
+
+    # Discord username
+    if member.name:
+
         names.add(
-            normalize_name(member.global_name)
+            normalize_name(
+                member.name
+            )
         )
 
-    return names
+
+    # Server nickname / display name
+    if member.display_name:
+
+        names.add(
+            normalize_name(
+                member.display_name
+            )
+        )
+
+
+    # Global Discord display name
+    if member.global_name:
+
+        names.add(
+            normalize_name(
+                member.global_name
+            )
+        )
+
+
+    return {
+        name
+        for name in names
+        if name
+    }
+
+
+def names_match(
+    ign,
+    member
+):
+
+    """
+    More flexible matching.
+
+    Examples that can match:
+
+    IGN:
+    Chicken
+
+    Discord:
+    Chicken (@Kimoy123)
+
+    ----------------
+
+    IGN:
+    Taekia
+
+    Discord:
+    Taekia 4 Her
+    """
+
+    ign_key = normalize_name(
+        ign
+    )
+
+
+    if not ign_key:
+
+        return False
+
+
+    member_names = get_member_names(
+        member
+    )
+
+
+    # Exact match first
+    if ign_key in member_names:
+
+        return True
+
+
+    # Smart partial matching
+    # Only do this for names with at least 4 characters
+    # to avoid things like "A" matching everybody.
+    if len(ign_key) >= 4:
+
+        for discord_name in member_names:
+
+            # IGN at beginning of Discord name
+            if discord_name.startswith(
+                ign_key
+            ):
+
+                return True
+
+
+            # Discord username at beginning of IGN
+            if (
+                len(discord_name) >= 4
+                and ign_key.startswith(
+                    discord_name
+                )
+            ):
+
+                return True
+
+
+    return False
 
 
 # =========================================================
-# AMOUNT FUNCTIONS
+# NUMBER FUNCTIONS
 # =========================================================
 
 def convert_amount(value):
@@ -175,29 +298,40 @@ def convert_amount(value):
         .replace(" ", "")
     )
 
+
     try:
 
         if value.endswith("B"):
+
             return int(
                 float(value[:-1])
                 * 1_000_000_000
             )
 
+
         if value.endswith("M"):
+
             return int(
                 float(value[:-1])
                 * 1_000_000
             )
 
+
         if value.endswith("K"):
+
             return int(
                 float(value[:-1])
                 * 1_000
             )
 
-        return int(float(value))
+
+        return int(
+            float(value)
+        )
+
 
     except ValueError:
+
         return 0
 
 
@@ -205,27 +339,32 @@ def format_amount(amount):
 
     if amount >= 1_000_000_000:
 
-        value = amount / 1_000_000_000
+        return (
+            f"{amount / 1_000_000_000:g}B"
+        )
 
-        return f"{value:g}B"
 
     if amount >= 1_000_000:
 
-        value = amount / 1_000_000
+        return (
+            f"{amount / 1_000_000:g}M"
+        )
 
-        return f"{value:g}M"
 
     if amount >= 1_000:
 
-        value = amount / 1_000
+        return (
+            f"{amount / 1_000:g}K"
+        )
 
-        return f"{value:g}K"
 
-    return str(amount)
+    return str(
+        amount
+    )
 
 
 # =========================================================
-# CREDIT DATABASE FUNCTIONS
+# CREDIT FUNCTIONS
 # =========================================================
 
 def is_day_covered(
@@ -247,7 +386,11 @@ def is_day_covered(
         day
     ))
 
-    return cursor.fetchone() is not None
+
+    return (
+        cursor.fetchone()
+        is not None
+    )
 
 
 def get_credit_balance(
@@ -265,10 +408,14 @@ def get_credit_balance(
         ign_key
     ))
 
+
     row = cursor.fetchone()
 
+
     if row:
+
         return row[0]
+
 
     return 0
 
@@ -301,6 +448,7 @@ def set_credit_balance(
         balance
     ))
 
+
     db.commit()
 
 
@@ -327,11 +475,12 @@ def add_coverage(
         covered_day
     ))
 
+
     db.commit()
 
 
 # =========================================================
-# ADVANCE PAYMENT SYSTEM
+# ADVANCE PAYMENT
 # =========================================================
 
 def apply_credit(
@@ -342,23 +491,34 @@ def apply_credit(
 ):
 
     if start_day is None:
+
         start_day = get_today()
 
-    ign_key = normalize_name(ign)
+
+    ign_key = normalize_name(
+        ign
+    )
+
 
     balance = get_credit_balance(
         guild,
         ign_key
     )
 
+
     balance += amount
+
 
     check_date = date.fromisoformat(
         start_day
     )
 
+
+    # Every full 100K covers another day
     while balance >= DAILY_REQUIREMENT:
 
+
+        # Skip days already paid
         while is_day_covered(
             guild,
             ign_key,
@@ -369,6 +529,7 @@ def apply_credit(
                 days=1
             )
 
+
         add_coverage(
             guild,
             ign_key,
@@ -376,11 +537,14 @@ def apply_credit(
             check_date.isoformat()
         )
 
+
         balance -= DAILY_REQUIREMENT
+
 
         check_date += timedelta(
             days=1
         )
+
 
     set_credit_balance(
         guild,
@@ -388,6 +552,7 @@ def apply_credit(
         ign,
         balance
     )
+
 
     return balance
 
@@ -401,6 +566,7 @@ def get_covered_through(
         get_today()
     )
 
+
     if not is_day_covered(
         guild,
         ign_key,
@@ -409,21 +575,25 @@ def get_covered_through(
 
         return None
 
-    current_day = today
+
+    check_date = today
 
     last_day = today
+
 
     while is_day_covered(
         guild,
         ign_key,
-        current_day.isoformat()
+        check_date.isoformat()
     ):
 
-        last_day = current_day
+        last_day = check_date
 
-        current_day += timedelta(
+
+        check_date += timedelta(
             days=1
         )
+
 
     return last_day.isoformat()
 
@@ -443,6 +613,7 @@ def save_donation(
 ):
 
     today = get_today()
+
 
     cursor.execute("""
     INSERT INTO donations
@@ -468,16 +639,24 @@ def save_donation(
         today
     ))
 
-    donation_id = cursor.lastrowid
+
+    donation_id = (
+        cursor.lastrowid
+    )
+
 
     db.commit()
 
+
+    # Automatically convert donation
+    # to daily coverage
     apply_credit(
         guild,
         ign,
         donation,
         today
     )
+
 
     cursor.execute("""
     INSERT OR IGNORE INTO credit_processed
@@ -489,16 +668,20 @@ def save_donation(
         donation_id,
     ))
 
+
     db.commit()
+
 
     return donation_id
 
 
 # =========================================================
-# LEADERBOARD DATABASE
+# LEADERBOARD
 # =========================================================
 
-def get_leaderboard(guild):
+def get_leaderboard(
+    guild
+):
 
     cursor.execute("""
     SELECT ign, SUM(donation)
@@ -511,11 +694,12 @@ def get_leaderboard(guild):
         guild,
     ))
 
+
     return cursor.fetchall()
 
 
 # =========================================================
-# MIGRATE OLD DONATIONS
+# OLD DONATION MIGRATION
 # =========================================================
 
 def migrate_old_donations():
@@ -527,13 +711,17 @@ def migrate_old_donations():
         ign,
         donation,
         day
+
     FROM donations
+
     ORDER BY id ASC
     """)
+
 
     rows = cursor.fetchall()
 
     converted = 0
+
 
     for (
         donation_id,
@@ -543,6 +731,7 @@ def migrate_old_donations():
         donation_day
     ) in rows:
 
+
         cursor.execute("""
         SELECT 1
         FROM credit_processed
@@ -551,11 +740,16 @@ def migrate_old_donations():
             donation_id,
         ))
 
+
         if cursor.fetchone():
+
             continue
 
+
         if not donation_day:
+
             donation_day = get_today()
+
 
         apply_credit(
             guild,
@@ -563,6 +757,7 @@ def migrate_old_donations():
             amount,
             donation_day
         )
+
 
         cursor.execute("""
         INSERT OR IGNORE INTO credit_processed
@@ -574,9 +769,12 @@ def migrate_old_donations():
             donation_id,
         ))
 
+
         converted += 1
 
+
     db.commit()
+
 
     if converted:
 
@@ -596,6 +794,7 @@ migrate_old_donations()
 intents = discord.Intents.default()
 
 intents.message_content = True
+
 intents.members = True
 
 
@@ -659,7 +858,7 @@ GUILD_CHOICES = [
 
 
 # =========================================================
-# BOT READY
+# READY
 # =========================================================
 
 @bot.event
@@ -669,17 +868,21 @@ async def on_ready():
         f"Logged in as {bot.user}"
     )
 
+
     guild = discord.Object(
         id=SERVER_ID
     )
+
 
     bot.tree.copy_global_to(
         guild=guild
     )
 
+
     synced = await bot.tree.sync(
         guild=guild
     )
+
 
     print(
         f"Synced {len(synced)} commands "
@@ -706,23 +909,27 @@ async def donationstatus(
     guild: app_commands.Choice[str]
 ):
 
-    # Immediately tells Discord the bot is working
+
     await interaction.response.defer(
         thinking=True
     )
+
 
     try:
 
         guild_name = guild.value
 
+
         print(
-            f"/donationstatus started for "
-            f"{guild_name}"
+            f"/donationstatus started "
+            f"for {guild_name}"
         )
+
 
         role_id = GUILD_ROLES.get(
             guild_name
         )
+
 
         if role_id is None:
 
@@ -733,12 +940,16 @@ async def donationstatus(
 
             return
 
-        discord_guild = interaction.guild
+
+        discord_guild = (
+            interaction.guild
+        )
+
 
         if discord_guild is None:
 
             await interaction.followup.send(
-                "❌ Use this command inside "
+                "❌ Use this inside "
                 "the Discord server."
             )
 
@@ -749,10 +960,6 @@ async def donationstatus(
         # LOAD MEMBERS
         # =================================================
 
-        print(
-            "Loading server members..."
-        )
-
         try:
 
             await asyncio.wait_for(
@@ -762,17 +969,14 @@ async def donationstatus(
                 timeout=10
             )
 
-            print(
-                "Member loading finished."
-            )
 
         except asyncio.TimeoutError:
 
             print(
-                "Member loading timed out "
-                "after 10 seconds. "
-                "Continuing with cached members."
+                "Member loading timed out. "
+                "Using cached members."
             )
+
 
         except Exception as e:
 
@@ -782,17 +986,18 @@ async def donationstatus(
 
 
         # =================================================
-        # FIND GUILD ROLE
+        # ROLE
         # =================================================
 
         role = discord_guild.get_role(
             role_id
         )
 
+
         if role is None:
 
             await interaction.followup.send(
-                f"❌ I couldn't find the role "
+                f"❌ Can't find the role "
                 f"for **{guild_name}**."
             )
 
@@ -800,19 +1005,45 @@ async def donationstatus(
 
 
         members = [
+
             member
+
             for member in role.members
+
             if not member.bot
         ]
 
+
         print(
-            f"Found {len(members)} members "
-            f"with {guild_name} role."
+            f"Found {len(members)} members."
         )
 
 
         # =================================================
-        # CHECK MEMBERS
+        # LOAD CREDIT ACCOUNTS
+        # =================================================
+
+        cursor.execute("""
+        SELECT
+            ign_key,
+            display_ign,
+            balance
+
+        FROM donation_credit
+
+        WHERE guild=?
+        """, (
+            guild_name,
+        ))
+
+
+        credit_accounts = (
+            cursor.fetchall()
+        )
+
+
+        # =================================================
+        # MATCH IGNS TO DISCORD MEMBERS
         # =================================================
 
         covered_members = []
@@ -824,39 +1055,32 @@ async def donationstatus(
 
         for member in members:
 
-            possible_names = (
-                get_member_names(member)
-            )
-
-            matched_key = None
+            matched_account = None
 
 
-            for name in possible_names:
+            # Check every known IGN against this member
+            for (
+                ign_key,
+                display_ign,
+                balance
+            ) in credit_accounts:
 
-                cursor.execute("""
-                SELECT ign_key
-                FROM donation_credit
-                WHERE guild=?
-                AND ign_key=?
-                """, (
-                    guild_name,
-                    name
-                ))
 
-                row = cursor.fetchone()
+                if names_match(
+                    display_ign,
+                    member
+                ):
 
-                if row:
-
-                    matched_key = row[0]
-
-                    matched_ign_keys.add(
-                        matched_key
+                    matched_account = (
+                        ign_key,
+                        display_ign,
+                        balance
                     )
 
                     break
 
 
-            if matched_key is None:
+            if matched_account is None:
 
                 missing_members.append(
                     member
@@ -865,33 +1089,47 @@ async def donationstatus(
                 continue
 
 
+            (
+                ign_key,
+                display_ign,
+                balance
+            ) = matched_account
+
+
+            # IMPORTANT:
+            # Mark it matched immediately,
+            # even if they aren't covered today.
+            #
+            # This prevents the same IGN appearing
+            # under "Not Matched to Discord".
+            matched_ign_keys.add(
+                ign_key
+            )
+
+
             if is_day_covered(
                 guild_name,
-                matched_key,
+                ign_key,
                 get_today()
             ):
 
                 covered_through = (
                     get_covered_through(
                         guild_name,
-                        matched_key
+                        ign_key
                     )
                 )
 
-                balance = (
-                    get_credit_balance(
-                        guild_name,
-                        matched_key
-                    )
-                )
 
                 covered_members.append(
                     (
                         member,
+                        display_ign,
                         covered_through,
                         balance
                     )
                 )
+
 
             else:
 
@@ -901,23 +1139,8 @@ async def donationstatus(
 
 
         # =================================================
-        # UNMATCHED IGNS
+        # UNMATCHED DONATION ACCOUNTS
         # =================================================
-
-        cursor.execute("""
-        SELECT
-            ign_key,
-            display_ign,
-            balance
-        FROM donation_credit
-        WHERE guild=?
-        """, (
-            guild_name,
-        ))
-
-        credit_accounts = (
-            cursor.fetchall()
-        )
 
         unmatched = []
 
@@ -928,9 +1151,42 @@ async def donationstatus(
             balance
         ) in credit_accounts:
 
+
+            # Already matched = NEVER show unmatched
             if ign_key in matched_ign_keys:
+
                 continue
 
+
+            # Extra safety:
+            # Run through all role members one more time
+            # before calling an IGN unmatched.
+            matched_someone = False
+
+
+            for member in members:
+
+                if names_match(
+                    display_ign,
+                    member
+                ):
+
+                    matched_someone = True
+
+                    matched_ign_keys.add(
+                        ign_key
+                    )
+
+                    break
+
+
+            if matched_someone:
+
+                continue
+
+
+            # Only show unmatched IGNs that are
+            # actually covered today
             if is_day_covered(
                 guild_name,
                 ign_key,
@@ -995,18 +1251,21 @@ async def donationstatus(
 
 
         # =================================================
-        # COVERED LIST
+        # COVERED MEMBERS
         # =================================================
 
         if covered_members:
 
             covered_text = ""
 
+
             for (
                 member,
+                display_ign,
                 covered_through,
                 balance
             ) in covered_members:
+
 
                 line = (
                     f"✅ **{member.display_name}**"
@@ -1024,8 +1283,11 @@ async def donationstatus(
                             covered_through,
                             "%Y-%m-%d"
                         )
-                        .strftime("%d %b")
+                        .strftime(
+                            "%d %b"
+                        )
                     )
+
 
                     line += (
                         f" — paid through "
@@ -1074,21 +1336,23 @@ async def donationstatus(
             embed.add_field(
                 name="✅ Covered Today",
                 value=(
-                    "Nobody is currently covered."
+                    "Nobody is covered yet."
                 ),
                 inline=False
             )
 
 
         # =================================================
-        # MISSING LIST
+        # MISSING MEMBERS
         # =================================================
 
         if missing_members:
 
             missing_text = ""
 
+
             for member in missing_members:
+
 
                 line = (
                     f"❌ {member.mention} "
@@ -1132,18 +1396,24 @@ async def donationstatus(
 
 
         # =================================================
-        # UNMATCHED IGNS
+        # TRULY UNMATCHED IGNS
         # =================================================
 
         if unmatched:
 
             unmatched_text = ""
 
-            for ign, balance in unmatched:
+
+            for (
+                display_ign,
+                balance
+            ) in unmatched:
+
 
                 line = (
-                    f"⚠️ **{ign}**"
+                    f"⚠️ **{display_ign}**"
                 )
+
 
                 if balance > 0:
 
@@ -1152,6 +1422,7 @@ async def donationstatus(
                         f"{format_amount(balance)} "
                         f"credit"
                     )
+
 
                 line += "\n"
 
@@ -1177,9 +1448,9 @@ async def donationstatus(
                 value=(
                     unmatched_text
                     +
-                    "\nTheir IGN does not match "
-                    "their Discord display name "
-                    "or username."
+                    "\nThese are donation IGNs "
+                    "I genuinely couldn't match "
+                    "to anyone with this guild role."
                 ),
                 inline=False
             )
@@ -1206,19 +1477,21 @@ async def donationstatus(
 
     except Exception as e:
 
+
         print(
             "DONATION STATUS ERROR:"
         )
+
 
         print(
             repr(e)
         )
 
+
         try:
 
             await interaction.followup.send(
-                "❌ Something went wrong while "
-                "checking donation status. "
+                "❌ Something went wrong. "
                 "Check the Railway logs."
             )
 
@@ -1246,6 +1519,7 @@ async def leaderboard(
     guild: app_commands.Choice[str]
 ):
 
+
     data = get_leaderboard(
         guild.value
     )
@@ -1266,6 +1540,7 @@ async def leaderboard(
             "No donations recorded yet."
         )
 
+
     else:
 
         medals = [
@@ -1273,6 +1548,7 @@ async def leaderboard(
             "🥈",
             "🥉"
         ]
+
 
         text = ""
 
@@ -1285,11 +1561,13 @@ async def leaderboard(
             start=1
         ):
 
+
             if index <= 3:
 
                 rank = medals[
                     index - 1
                 ]
+
 
             else:
 
@@ -1306,9 +1584,6 @@ async def leaderboard(
 
 
         embed.description = text
-
-
-    timestamp = get_timestamp()
 
 
     embed.set_footer(
@@ -1330,12 +1605,14 @@ async def leaderboard(
 @bot.event
 async def on_message(message):
 
+
     await bot.process_commands(
         message
     )
 
 
     if message.author.bot:
+
         return
 
 
@@ -1351,7 +1628,7 @@ async def on_message(message):
 
 
     # =====================================================
-    # READ DONATION LOG
+    # PARSE LOG
     # =====================================================
 
     ign_match = re.search(
@@ -1398,6 +1675,7 @@ async def on_message(message):
 
 
     previous = (
+
         previous_match
         .group(1)
         .strip()
@@ -1409,6 +1687,7 @@ async def on_message(message):
 
 
     current = (
+
         current_match
         .group(1)
         .strip()
@@ -1426,10 +1705,8 @@ async def on_message(message):
     )
 
 
-    donation_amount = (
-        convert_amount(
-            donation_text
-        )
+    donation_amount = convert_amount(
+        donation_text
     )
 
 
@@ -1452,7 +1729,7 @@ async def on_message(message):
 
 
     # =====================================================
-    # SAVE DONATION
+    # SAVE
     # =====================================================
 
     save_donation(
@@ -1514,6 +1791,7 @@ async def on_message(message):
                 )
             )
 
+
         except Exception as e:
 
             print(
@@ -1573,16 +1851,18 @@ async def on_message(message):
 
 
     # =====================================================
-    # COVERAGE DISPLAY
+    # COVERAGE
     # =====================================================
 
     if covered_through:
+
 
         if covered_through == get_today():
 
             coverage_text = (
                 "✅ **Today's 100K is covered**"
             )
+
 
         else:
 
@@ -1596,10 +1876,12 @@ async def on_message(message):
                 )
             )
 
+
             coverage_text = (
                 f"✅ Paid through "
                 f"**{through_date}**"
             )
+
 
     else:
 
@@ -1631,7 +1913,6 @@ async def on_message(message):
     )
 
 
-    # Automatically appears in each person's timezone
     embed.add_field(
         name="Time Logged",
         value=(
@@ -1666,6 +1947,7 @@ async def on_message(message):
             embed=embed
         )
 
+
     except Exception as e:
 
         print(
@@ -1674,7 +1956,7 @@ async def on_message(message):
 
 
 # =========================================================
-# START BOT
+# START
 # =========================================================
 
 if not TOKEN:
@@ -1691,11 +1973,13 @@ try:
         TOKEN
     )
 
+
 except Exception as e:
 
     print(
         "BOT CRASHED:"
     )
+
 
     print(
         repr(e)
