@@ -9,6 +9,7 @@ import re
 import asyncio
 
 from datetime import datetime, timezone, date, timedelta
+from typing import Optional
 
 
 # =========================================================
@@ -21,7 +22,7 @@ TOKEN = os.getenv("TOKEN")
 
 SERVER_ID = 1529030570410119259
 
-# 100K = 1 donation day
+# 100K = 1 covered day
 DAILY_REQUIREMENT = 100_000
 
 
@@ -71,7 +72,6 @@ TRACKER_CHANNEL_ID = 1532339634829267149
 # =========================================================
 
 db = sqlite3.connect("donations.db")
-
 cursor = db.cursor()
 
 
@@ -144,7 +144,6 @@ def column_exists(table, column):
     return column in columns
 
 
-# Add message_id to old databases
 if not column_exists(
     "donations",
     "message_id"
@@ -156,7 +155,6 @@ if not column_exists(
     """)
 
 
-# Add channel_id
 if not column_exists(
     "donations",
     "channel_id"
@@ -171,8 +169,6 @@ if not column_exists(
 db.commit()
 
 
-# Prevent the same Discord message
-# from ever being imported twice.
 cursor.execute("""
 CREATE UNIQUE INDEX IF NOT EXISTS
 idx_donations_message_id
@@ -197,7 +193,11 @@ def get_now():
 
 def get_today():
 
-    return get_now().date().isoformat()
+    return (
+        get_now()
+        .date()
+        .isoformat()
+    )
 
 
 def get_timestamp():
@@ -207,9 +207,7 @@ def get_timestamp():
     )
 
 
-def discord_timestamp(
-    timestamp
-):
+def discord_timestamp(timestamp):
 
     return (
         f"<t:{timestamp}:F>\n"
@@ -299,7 +297,7 @@ def names_match(
         return True
 
 
-    # Flexible matching
+    # Safe flexible match
     if len(ign_key) >= 4:
 
         for discord_name in member_names:
@@ -325,7 +323,7 @@ def names_match(
 
 
 # =========================================================
-# AMOUNT FUNCTIONS
+# NUMBER FUNCTIONS
 # =========================================================
 
 def convert_amount(value):
@@ -396,49 +394,49 @@ def format_amount(amount):
         )
 
 
-    return str(
-        amount
-    )
+    return str(amount)
 
 
 # =========================================================
-# MESSAGE PARSER
+# DONATION MESSAGE PARSER
 # =========================================================
 
 def parse_donation_message(text):
 
     ign_match = re.search(
-        r"IGN:\s*(.+)",
+        r"IGN\s*:\s*(.+)",
         text,
         re.IGNORECASE
     )
 
 
     previous_match = re.search(
-        r"Previous Guild Gold:\s*(.+)",
+        r"Previous\s+Guild\s+Gold\s*:\s*(.+)",
         text,
         re.IGNORECASE
     )
 
 
     current_match = re.search(
-        r"Current Guild Gold:\s*(.+)",
+        r"Current\s+Guild\s+Gold\s*:\s*(.+)",
         text,
         re.IGNORECASE
     )
 
 
     donation_match = re.search(
-        r"Daily Donation:\s*(.+)",
+        r"Daily\s+Donation\s*:\s*(.+)",
         text,
         re.IGNORECASE
     )
 
 
-    if (
-        not ign_match
-        or not donation_match
-    ):
+    if not ign_match:
+
+        return None
+
+
+    if not donation_match:
 
         return None
 
@@ -451,7 +449,6 @@ def parse_donation_message(text):
 
 
     previous = (
-
         previous_match
         .group(1)
         .strip()
@@ -463,7 +460,6 @@ def parse_donation_message(text):
 
 
     current = (
-
         current_match
         .group(1)
         .strip()
@@ -632,20 +628,6 @@ def apply_credit(
     start_day
 ):
 
-    """
-    100K = 1 day.
-
-    Example:
-    200K on Aug 2
-    covers:
-    Aug 2
-    Aug 3
-
-    If Aug 3 is already covered,
-    the second 100K automatically
-    moves to Aug 4.
-    """
-
     ign_key = normalize_name(
         ign
     )
@@ -668,8 +650,8 @@ def apply_credit(
     while balance >= DAILY_REQUIREMENT:
 
 
-        # Never stack two payments
-        # onto the same covered day.
+        # If a day is already paid,
+        # move to the next day.
         while is_day_covered(
             guild,
             ign_key,
@@ -759,8 +741,11 @@ def message_already_logged(
 
     cursor.execute("""
     SELECT id
+
     FROM donations
+
     WHERE message_id=?
+
     LIMIT 1
     """, (
         str(message_id),
@@ -773,6 +758,10 @@ def message_already_logged(
     )
 
 
+# =========================================================
+# FIND OLD UNLINKED DATABASE ROW
+# =========================================================
+
 def find_old_unlinked_donation(
     guild,
     ign,
@@ -781,18 +770,6 @@ def find_old_unlinked_donation(
     amount,
     donation_day
 ):
-
-    """
-    Old versions of the bot did not save
-    Discord message IDs.
-
-    During /syncoldlogs we try to match
-    old database rows to their Discord
-    messages before importing anything.
-
-    This prevents the old donation from
-    being counted twice.
-    """
 
     cursor.execute("""
     SELECT
@@ -820,7 +797,7 @@ def find_old_unlinked_donation(
     rows = cursor.fetchall()
 
 
-    target_ign = normalize_name(
+    wanted_ign = normalize_name(
         ign
     )
 
@@ -836,13 +813,13 @@ def find_old_unlinked_donation(
 
         if (
             normalize_name(database_ign)
-            != target_ign
+            != wanted_ign
         ):
 
             continue
 
 
-        # Extra protection using gold values
+        # Match previous gold if available
         if (
             previous != "Unknown"
             and database_previous
@@ -850,13 +827,21 @@ def find_old_unlinked_donation(
         ):
 
             if (
-                database_previous.strip().lower()
-                != previous.strip().lower()
+                database_previous
+                .strip()
+                .lower()
+
+                !=
+
+                previous
+                .strip()
+                .lower()
             ):
 
                 continue
 
 
+        # Match current gold if available
         if (
             current != "Unknown"
             and database_current
@@ -864,8 +849,15 @@ def find_old_unlinked_donation(
         ):
 
             if (
-                database_current.strip().lower()
-                != current.strip().lower()
+                database_current
+                .strip()
+                .lower()
+
+                !=
+
+                current
+                .strip()
+                .lower()
             ):
 
                 continue
@@ -918,7 +910,6 @@ def save_donation(
     channel_id
 ):
 
-    # Absolute duplicate protection
     if message_already_logged(
         message_id
     ):
@@ -966,7 +957,7 @@ def save_donation(
     db.commit()
 
 
-    # Apply the payment ONCE.
+    # Apply credit exactly once.
     apply_credit(
         guild,
         ign,
@@ -1024,17 +1015,10 @@ def get_leaderboard(
 
 
 # =========================================================
-# MIGRATE PREVIOUS DATABASE
+# MIGRATE OLD DATABASE DONATIONS
 # =========================================================
 
 def migrate_old_donations():
-
-    """
-    Processes old database rows only once.
-
-    credit_processed prevents the bot from
-    rebuilding their credit every restart.
-    """
 
     cursor.execute("""
     SELECT
@@ -1067,7 +1051,9 @@ def migrate_old_donations():
 
         cursor.execute("""
         SELECT 1
+
         FROM credit_processed
+
         WHERE donation_id=?
         """, (
             donation_id,
@@ -1113,8 +1099,8 @@ def migrate_old_donations():
     if converted:
 
         print(
-            f"Converted {converted} "
-            f"old database donations."
+            f"Converted {converted} old "
+            f"database donations."
         )
 
 
@@ -1138,7 +1124,7 @@ bot = commands.Bot(
 
 
 # =========================================================
-# GUILD OPTIONS
+# GUILD CHOICES
 # =========================================================
 
 GUILD_CHOICES = [
@@ -1153,6 +1139,20 @@ GUILD_CHOICES = [
         10
     )
 ]
+
+
+# =========================================================
+# SYNC GUILD CHOICES
+# =========================================================
+
+SYNC_GUILD_CHOICES = [
+
+    app_commands.Choice(
+        name="All Guilds",
+        value="ALL"
+    )
+
+] + GUILD_CHOICES
 
 
 # =========================================================
@@ -1189,7 +1189,7 @@ async def on_ready():
 
 
 # =========================================================
-# BUILD TRACKER EMBED
+# TRACKER EMBED
 # =========================================================
 
 def build_tracker_embed(
@@ -1197,7 +1197,6 @@ def build_tracker_embed(
     ign,
     previous,
     current,
-    donation_text,
     donation_amount,
     author,
     timestamp,
@@ -1210,7 +1209,7 @@ def build_tracker_embed(
     )
 
 
-    credit_balance = get_credit_balance(
+    balance = get_credit_balance(
         guild_name,
         ign_key
     )
@@ -1224,17 +1223,14 @@ def build_tracker_embed(
 
     if imported:
 
-        title = (
-            "📥 Historical Donation Imported"
-        )
+        title = "📥 Historical Donation"
 
         colour = discord.Color.blurple()
 
+
     else:
 
-        title = (
-            "💰 Donation Recorded"
-        )
+        title = "💰 Donation Recorded"
 
         colour = discord.Color.green()
 
@@ -1244,10 +1240,6 @@ def build_tracker_embed(
         color=colour
     )
 
-
-    # =========================================
-    # PLAYER + GUILD
-    # =========================================
 
     embed.add_field(
         name="👤 Player",
@@ -1273,35 +1265,23 @@ def build_tracker_embed(
     )
 
 
-    # =========================================
-    # GOLD
-    # =========================================
-
     embed.add_field(
-        name="Before",
-        value=previous,
-        inline=True
+        name="Guild Gold",
+        value=(
+            f"`{previous}`  ➜  `{current}`"
+        ),
+        inline=False
     )
 
 
-    embed.add_field(
-        name="After",
-        value=current,
-        inline=True
-    )
-
-
-    # =========================================
-    # COVERAGE
-    # =========================================
-
+    # Coverage
     if covered_through:
 
 
         if covered_through == get_today():
 
             coverage = (
-                "✅ **Covered today**"
+                "✅ Covered today"
             )
 
 
@@ -1319,38 +1299,40 @@ def build_tracker_embed(
 
 
             coverage = (
-                f"✅ Covered through "
+                f"✅ Paid through "
                 f"**{through_date}**"
             )
 
 
     else:
 
-        coverage = (
-            "ℹ️ Historical payment applied"
-            if imported
-            else "⚠️ Not covered today"
-        )
+        if imported:
+
+            coverage = (
+                "📚 Historical payment recorded"
+            )
+
+        else:
+
+            coverage = (
+                "⚠️ Not covered today"
+            )
 
 
-    if credit_balance > 0:
+    if balance > 0:
 
         coverage += (
             f"\n💳 Remaining credit: "
-            f"**{format_amount(credit_balance)}**"
+            f"**{format_amount(balance)}**"
         )
 
 
     embed.add_field(
-        name="📅 Payment Coverage",
+        name="📅 Coverage",
         value=coverage,
         inline=False
     )
 
-
-    # =========================================
-    # LOG INFORMATION
-    # =========================================
 
     embed.add_field(
         name="📝 Logged By",
@@ -1360,7 +1342,7 @@ def build_tracker_embed(
 
 
     embed.add_field(
-        name="🕒 Logged At",
+        name="🕒 Original Time",
         value=discord_timestamp(
             timestamp
         ),
@@ -1371,7 +1353,7 @@ def build_tracker_embed(
     embed.add_field(
         name="🔗 Source",
         value=(
-            f"[View original log]"
+            f"[Open original message]"
             f"({message_url})"
         ),
         inline=False
@@ -1383,8 +1365,7 @@ def build_tracker_embed(
         embed.set_footer(
             text=(
                 "Historical import • "
-                "Original message time preserved • "
-                "100K = 1 day"
+                "Original Discord time preserved"
             )
         )
 
@@ -1394,8 +1375,7 @@ def build_tracker_embed(
         embed.set_footer(
             text=(
                 "100K = 1 day • "
-                "Extra donations automatically "
-                "cover future days"
+                "Extra donations cover future days"
             )
         )
 
@@ -1435,7 +1415,7 @@ async def process_donation_message(
         return "invalid"
 
 
-    # Already imported / processed
+    # Valid donation message found.
     if message_already_logged(
         message.id
     ):
@@ -1448,22 +1428,27 @@ async def process_donation_message(
     ]
 
 
-    ign = parsed["ign"]
-
-    previous = parsed["previous"]
-
-    current = parsed["current"]
-
-    donation_text = (
-        parsed["donation_text"]
-    )
-
-    donation_amount = (
-        parsed["donation_amount"]
-    )
+    ign = parsed[
+        "ign"
+    ]
 
 
-    # Always use ORIGINAL Discord message time.
+    previous = parsed[
+        "previous"
+    ]
+
+
+    current = parsed[
+        "current"
+    ]
+
+
+    donation_amount = parsed[
+        "donation_amount"
+    ]
+
+
+    # Original Discord message date
     created_at = (
         message.created_at
         .astimezone(
@@ -1485,7 +1470,7 @@ async def process_donation_message(
 
 
     # =====================================================
-    # OLD DATABASE MATCH
+    # OLD DATABASE LINKING
     # =====================================================
 
     if imported:
@@ -1502,12 +1487,11 @@ async def process_donation_message(
         )
 
 
-        # This was already processed by the
-        # previous version of the bot.
-        # Link its message ID but DO NOT add
-        # any credit again.
         if existing_id:
 
+            # Link it only.
+            #
+            # DO NOT apply advance credit again.
             link_message_to_existing_donation(
                 existing_id,
                 message.id,
@@ -1519,7 +1503,7 @@ async def process_donation_message(
 
 
     # =====================================================
-    # NEW DONATION
+    # SAVE NEW LOG
     # =====================================================
 
     donation_id = save_donation(
@@ -1541,6 +1525,10 @@ async def process_donation_message(
         return "duplicate"
 
 
+    # =====================================================
+    # TRACKER
+    # =====================================================
+
     tracker = bot.get_channel(
         TRACKER_CHANNEL_ID
     )
@@ -1550,15 +1538,17 @@ async def process_donation_message(
 
         try:
 
-            tracker = await bot.fetch_channel(
-                TRACKER_CHANNEL_ID
+            tracker = (
+                await bot.fetch_channel(
+                    TRACKER_CHANNEL_ID
+                )
             )
 
 
         except Exception as e:
 
             print(
-                f"Tracker channel error: {e}"
+                f"Tracker fetch error: {e}"
             )
 
             return "saved_no_tracker"
@@ -1569,7 +1559,6 @@ async def process_donation_message(
         ign=ign,
         previous=previous,
         current=current,
-        donation_text=donation_text,
         donation_amount=donation_amount,
         author=message.author,
         timestamp=timestamp,
@@ -1583,11 +1572,16 @@ async def process_donation_message(
     )
 
 
-    return "imported" if imported else "saved"
+    if imported:
+
+        return "imported"
+
+
+    return "saved"
 
 
 # =========================================================
-# LIVE DONATION READER
+# LIVE MESSAGE READER
 # =========================================================
 
 @bot.event
@@ -1641,34 +1635,112 @@ async def on_message(message):
 
 
 # =========================================================
+# HISTORY FETCH WITH RETRIES
+# =========================================================
+
+async def fetch_channel_history(
+    channel,
+    after=None,
+    attempts=3
+):
+
+    last_error = None
+
+
+    for attempt in range(
+        1,
+        attempts + 1
+    ):
+
+
+        try:
+
+            print(
+                f"History attempt "
+                f"{attempt}/{attempts} "
+                f"for #{channel.name}"
+            )
+
+
+            messages = []
+
+
+            history = channel.history(
+                limit=None,
+                oldest_first=True,
+                after=after
+            )
+
+
+            async for message in history:
+
+                messages.append(
+                    message
+                )
+
+
+            return messages
+
+
+        except Exception as e:
+
+            last_error = e
+
+
+            print(
+                f"History attempt "
+                f"{attempt} failed for "
+                f"#{channel.name}: "
+                f"{repr(e)}"
+            )
+
+
+            if attempt < attempts:
+
+                await asyncio.sleep(
+                    3
+                )
+
+
+    raise last_error
+
+
+# =========================================================
 # SYNC OLD LOGS
 # =========================================================
 
 @bot.tree.command(
     name="syncoldlogs",
-    description="Import old donation messages from all guild channels"
+    description="Scan old guild messages and import missing donation logs"
 )
 @app_commands.describe(
+    guild=(
+        "Choose one guild or scan all guilds"
+    ),
     days=(
-        "How many days back to scan. "
-        "Use 0 for all available history."
+        "Days of history to scan. "
+        "0 = all available history"
     )
+)
+@app_commands.choices(
+    guild=SYNC_GUILD_CHOICES
 )
 async def syncoldlogs(
     interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
     days: int = 0
 ):
 
-    # Only people with Manage Server
-    # can perform a full historical sync.
+    # Staff only
     if not (
-        interaction.user.guild_permissions
+        interaction.user
+        .guild_permissions
         .manage_guild
     ):
 
         await interaction.response.send_message(
             "❌ You need **Manage Server** "
-            "permission to run this command.",
+            "permission to run this.",
             ephemeral=True
         )
 
@@ -1678,7 +1750,7 @@ async def syncoldlogs(
     if days < 0:
 
         await interaction.response.send_message(
-            "❌ Days cannot be negative.",
+            "❌ `days` cannot be negative.",
             ephemeral=True
         )
 
@@ -1691,22 +1763,33 @@ async def syncoldlogs(
     )
 
 
-    imported = 0
+    # =====================================================
+    # CHOOSE CHANNELS
+    # =====================================================
 
-    duplicates = 0
+    if guild.value == "ALL":
 
-    linked = 0
-
-    invalid = 0
-
-    errors = 0
-
-    scanned = 0
+        channels_to_scan = list(
+            GUILD_CHANNELS.items()
+        )
 
 
-    print(
-        "Starting old donation sync..."
-    )
+    else:
+
+        channels_to_scan = [
+
+            (
+                channel_id,
+                guild_name
+            )
+
+            for (
+                channel_id,
+                guild_name
+            ) in GUILD_CHANNELS.items()
+
+            if guild_name == guild.value
+        ]
 
 
     after = None
@@ -1722,10 +1805,53 @@ async def syncoldlogs(
         )
 
 
+    all_results = {}
+
+
+    total_scanned = 0
+    total_valid = 0
+    total_imported = 0
+    total_duplicates = 0
+    total_linked = 0
+    total_invalid = 0
+    total_errors = 0
+
+
+    # =====================================================
+    # SCAN EACH GUILD
+    # =====================================================
+
     for (
         channel_id,
         guild_name
-    ) in GUILD_CHANNELS.items():
+    ) in channels_to_scan:
+
+
+        stats = {
+            "scanned": 0,
+            "valid": 0,
+            "imported": 0,
+            "duplicates": 0,
+            "linked": 0,
+            "invalid": 0,
+            "errors": 0,
+            "oldest": None,
+            "newest": None,
+        }
+
+
+        print(
+            "\n"
+            "================================="
+        )
+
+        print(
+            f"SYNCING {guild_name}"
+        )
+
+        print(
+            "================================="
+        )
 
 
         channel = bot.get_channel(
@@ -1748,152 +1874,355 @@ async def syncoldlogs(
 
                 print(
                     f"Could not access "
-                    f"{guild_name}: {e}"
+                    f"{guild_name}: {repr(e)}"
                 )
 
-                errors += 1
+
+                stats["errors"] += 1
+
+                all_results[
+                    guild_name
+                ] = stats
+
+                total_errors += 1
 
                 continue
 
 
-        print(
-            f"Scanning {guild_name}..."
-        )
-
+        # =================================================
+        # FETCH HISTORY
+        # =================================================
 
         try:
 
-            history = channel.history(
-                limit=None,
-                oldest_first=True,
-                after=after
+            messages = (
+                await fetch_channel_history(
+                    channel,
+                    after=after,
+                    attempts=3
+                )
             )
-
-
-            async for message in history:
-
-                scanned += 1
-
-
-                try:
-
-                    result = (
-                        await process_donation_message(
-                            message,
-                            imported=True
-                        )
-                    )
-
-
-                    if result == "imported":
-
-                        imported += 1
-
-
-                    elif result == "duplicate":
-
-                        duplicates += 1
-
-
-                    elif result == "linked":
-
-                        linked += 1
-
-
-                    elif result == "invalid":
-
-                        invalid += 1
-
-
-                except Exception as e:
-
-                    errors += 1
-
-
-                    print(
-                        f"Sync message error "
-                        f"{message.id}: "
-                        f"{repr(e)}"
-                    )
 
 
         except Exception as e:
 
-            errors += 1
-
-
             print(
-                f"History error for "
+                f"FAILED HISTORY for "
                 f"{guild_name}: "
                 f"{repr(e)}"
             )
 
 
+            stats["errors"] += 1
+
+            all_results[
+                guild_name
+            ] = stats
+
+            total_errors += 1
+
+            continue
+
+
+        # =================================================
+        # DATE RANGE
+        # =================================================
+
+        if messages:
+
+            stats["oldest"] = (
+                messages[0]
+                .created_at
+            )
+
+
+            stats["newest"] = (
+                messages[-1]
+                .created_at
+            )
+
+
+        # =================================================
+        # PROCESS MESSAGES
+        # =================================================
+
+        for message in messages:
+
+            stats[
+                "scanned"
+            ] += 1
+
+
+            parsed = parse_donation_message(
+                message.content
+            )
+
+
+            if not parsed:
+
+                stats[
+                    "invalid"
+                ] += 1
+
+                continue
+
+
+            stats[
+                "valid"
+            ] += 1
+
+
+            try:
+
+                result = (
+                    await process_donation_message(
+                        message,
+                        imported=True
+                    )
+                )
+
+
+                if result == "imported":
+
+                    stats[
+                        "imported"
+                    ] += 1
+
+
+                elif result == "duplicate":
+
+                    stats[
+                        "duplicates"
+                    ] += 1
+
+
+                elif result == "linked":
+
+                    stats[
+                        "linked"
+                    ] += 1
+
+
+                elif result == "saved_no_tracker":
+
+                    stats[
+                        "imported"
+                    ] += 1
+
+                    stats[
+                        "errors"
+                    ] += 1
+
+
+                elif result == "invalid":
+
+                    # Should rarely happen because
+                    # we already parsed it above.
+                    stats[
+                        "invalid"
+                    ] += 1
+
+
+            except Exception as e:
+
+                stats[
+                    "errors"
+                ] += 1
+
+
+                print(
+                    f"Message error "
+                    f"{message.id}: "
+                    f"{repr(e)}"
+                )
+
+
+        all_results[
+            guild_name
+        ] = stats
+
+
+        # Totals
+        total_scanned += (
+            stats["scanned"]
+        )
+
+        total_valid += (
+            stats["valid"]
+        )
+
+        total_imported += (
+            stats["imported"]
+        )
+
+        total_duplicates += (
+            stats["duplicates"]
+        )
+
+        total_linked += (
+            stats["linked"]
+        )
+
+        total_invalid += (
+            stats["invalid"]
+        )
+
+        total_errors += (
+            stats["errors"]
+        )
+
+
+        print(
+            f"{guild_name} finished:"
+        )
+
+        print(
+            f"Scanned: "
+            f"{stats['scanned']}"
+        )
+
+        print(
+            f"Valid logs: "
+            f"{stats['valid']}"
+        )
+
+        print(
+            f"Imported: "
+            f"{stats['imported']}"
+        )
+
+        print(
+            f"Already tracked: "
+            f"{stats['duplicates']}"
+        )
+
+        print(
+            f"Old DB linked: "
+            f"{stats['linked']}"
+        )
+
+        print(
+            f"Errors: "
+            f"{stats['errors']}"
+        )
+
+
     # =====================================================
-    # SYNC SUMMARY
+    # SUMMARY EMBED
     # =====================================================
 
     summary = discord.Embed(
-        title="✅ Historical Sync Complete",
+        title="🔄 Donation History Scan Complete",
         description=(
-            "The bot finished checking the "
-            "guild donation channels."
+            "Here's exactly what the bot found "
+            "in the selected donation channels."
         ),
-        color=discord.Color.green()
+        color=(
+            discord.Color.green()
+            if total_errors == 0
+            else discord.Color.orange()
+        )
     )
 
 
+    # =====================================================
+    # PER GUILD RESULTS
+    # =====================================================
+
+    for (
+        guild_name,
+        stats
+    ) in all_results.items():
+
+
+        if stats["oldest"]:
+
+            oldest_timestamp = int(
+                stats[
+                    "oldest"
+                ].timestamp()
+            )
+
+
+            newest_timestamp = int(
+                stats[
+                    "newest"
+                ].timestamp()
+            )
+
+
+            date_text = (
+                f"<t:{oldest_timestamp}:d> → "
+                f"<t:{newest_timestamp}:d>"
+            )
+
+
+        else:
+
+            date_text = (
+                "No messages found"
+            )
+
+
+        value = (
+            f"🔎 Scanned: **{stats['scanned']:,}**\n"
+            f"💰 Valid logs: **{stats['valid']:,}**\n"
+            f"📥 Imported: **{stats['imported']:,}**\n"
+            f"⏭️ Already tracked: **{stats['duplicates']:,}**\n"
+            f"🔗 Existing DB linked: **{stats['linked']:,}**\n"
+            f"⚠️ Errors: **{stats['errors']:,}**\n"
+            f"📅 Range: {date_text}"
+        )
+
+
+        summary.add_field(
+            name=f"🏰 {guild_name}",
+            value=value,
+            inline=True
+        )
+
+
+    # =====================================================
+    # TOTALS
+    # =====================================================
+
     summary.add_field(
-        name="📥 Imported",
-        value=str(imported),
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="🔗 Existing Logs Linked",
-        value=str(linked),
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="⏭️ Already Tracked",
-        value=str(duplicates),
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="🔎 Messages Scanned",
-        value=f"{scanned:,}",
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="💬 Non-Donation Messages",
-        value=f"{invalid:,}",
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="⚠️ Errors",
-        value=str(errors),
-        inline=True
-    )
-
-
-    summary.add_field(
-        name="🛡️ Duplicate Protection",
+        name="📊 Overall",
         value=(
-            "Every Discord message is tracked "
-            "by its unique message ID. "
-            "Re-running this command will not "
-            "stack advance payments."
+            f"**Messages scanned:** "
+            f"{total_scanned:,}\n"
+            f"**Valid donation logs:** "
+            f"{total_valid:,}\n"
+            f"**Newly imported:** "
+            f"{total_imported:,}\n"
+            f"**Already tracked:** "
+            f"{total_duplicates:,}\n"
+            f"**Existing records linked:** "
+            f"{total_linked:,}\n"
+            f"**Errors:** "
+            f"{total_errors:,}"
         ),
         inline=False
+    )
+
+
+    summary.add_field(
+        name="🛡️ Advance Payment Safety",
+        value=(
+            "Each Discord message uses its unique "
+            "**message ID**.\n\n"
+            "Running `/syncoldlogs` again will "
+            "**not add the same 100K/200K/300K twice**."
+        ),
+        inline=False
+    )
+
+
+    summary.set_footer(
+        text=(
+            "Tip: if one guild looks wrong, "
+            "run /syncoldlogs for only that guild."
+        )
     )
 
 
@@ -1903,22 +2232,13 @@ async def syncoldlogs(
     )
 
 
-    print(
-        f"Historical sync complete. "
-        f"Imported={imported}, "
-        f"Linked={linked}, "
-        f"Duplicates={duplicates}, "
-        f"Errors={errors}"
-    )
-
-
 # =========================================================
 # DONATION STATUS
 # =========================================================
 
 @bot.tree.command(
     name="donationstatus",
-    description="Check who is covered and who is missing today's 100K"
+    description="See who is covered and who is missing today's 100K"
 )
 @app_commands.describe(
     guild="Choose a guild"
@@ -1938,7 +2258,9 @@ async def donationstatus(
 
     try:
 
-        guild_name = guild.value
+        guild_name = (
+            guild.value
+        )
 
 
         role_id = GUILD_ROLES.get(
@@ -1949,7 +2271,7 @@ async def donationstatus(
         if role_id is None:
 
             await interaction.followup.send(
-                "❌ Guild role is not configured."
+                "❌ No role configured."
             )
 
             return
@@ -1961,10 +2283,6 @@ async def donationstatus(
 
 
         if discord_guild is None:
-
-            await interaction.followup.send(
-                "❌ Use this command in the server."
-            )
 
             return
 
@@ -1986,15 +2304,14 @@ async def donationstatus(
         except asyncio.TimeoutError:
 
             print(
-                "Member loading timed out. "
-                "Using cached members."
+                "Member chunk timed out."
             )
 
 
         except Exception as e:
 
             print(
-                f"Member loading error: {e}"
+                f"Member chunk error: {e}"
             )
 
 
@@ -2006,7 +2323,7 @@ async def donationstatus(
         if role is None:
 
             await interaction.followup.send(
-                f"❌ I couldn't find the role "
+                f"❌ Can't find the role "
                 f"for **{guild_name}**."
             )
 
@@ -2024,7 +2341,7 @@ async def donationstatus(
 
 
         # =================================================
-        # CREDIT ACCOUNTS
+        # GET ROBLOX DONATION ACCOUNTS
         # =================================================
 
         cursor.execute("""
@@ -2041,7 +2358,7 @@ async def donationstatus(
         ))
 
 
-        credit_accounts = (
+        accounts = (
             cursor.fetchall()
         )
 
@@ -2059,14 +2376,14 @@ async def donationstatus(
 
         for member in members:
 
-            matched_account = None
+            matched = None
 
 
             for (
                 ign_key,
                 display_ign,
                 balance
-            ) in credit_accounts:
+            ) in accounts:
 
 
                 if names_match(
@@ -2074,7 +2391,7 @@ async def donationstatus(
                     member
                 ):
 
-                    matched_account = (
+                    matched = (
                         ign_key,
                         display_ign,
                         balance
@@ -2083,7 +2400,7 @@ async def donationstatus(
                     break
 
 
-            if matched_account is None:
+            if matched is None:
 
                 missing_members.append(
                     member
@@ -2096,7 +2413,7 @@ async def donationstatus(
                 ign_key,
                 display_ign,
                 balance
-            ) = matched_account
+            ) = matched
 
 
             matched_ign_keys.add(
@@ -2110,7 +2427,7 @@ async def donationstatus(
                 get_today()
             ):
 
-                covered_through = (
+                through = (
                     get_covered_through(
                         guild_name,
                         ign_key
@@ -2122,7 +2439,7 @@ async def donationstatus(
                     (
                         member,
                         display_ign,
-                        covered_through,
+                        through,
                         balance
                     )
                 )
@@ -2136,17 +2453,17 @@ async def donationstatus(
 
 
         # =================================================
-        # UNMATCHED IGNS
+        # UNLINKED ROBLOX ACCOUNTS
         # =================================================
 
-        unmatched = []
+        unlinked = []
 
 
         for (
             ign_key,
             display_ign,
             balance
-        ) in credit_accounts:
+        ) in accounts:
 
 
             if ign_key in matched_ign_keys:
@@ -2154,7 +2471,8 @@ async def donationstatus(
                 continue
 
 
-            matched_someone = False
+            # One final matching check
+            actually_matched = False
 
 
             for member in members:
@@ -2164,7 +2482,7 @@ async def donationstatus(
                     member
                 ):
 
-                    matched_someone = True
+                    actually_matched = True
 
                     matched_ign_keys.add(
                         ign_key
@@ -2173,41 +2491,59 @@ async def donationstatus(
                     break
 
 
-            if matched_someone:
+            if actually_matched:
 
                 continue
 
 
-            if is_day_covered(
-                guild_name,
-                ign_key,
-                get_today()
-            ):
+            covered_today = (
+                is_day_covered(
+                    guild_name,
+                    ign_key,
+                    get_today()
+                )
+            )
 
-                unmatched.append(
-                    (
-                        display_ign,
-                        balance
+
+            covered_through = None
+
+
+            if covered_today:
+
+                covered_through = (
+                    get_covered_through(
+                        guild_name,
+                        ign_key
                     )
                 )
 
 
+            unlinked.append(
+                (
+                    display_ign,
+                    balance,
+                    covered_today,
+                    covered_through
+                )
+            )
+
+
+        # =================================================
+        # STATUS EMBED
+        # =================================================
+
         timestamp = get_timestamp()
 
-
-        # =================================================
-        # STATUS UI
-        # =================================================
 
         embed = discord.Embed(
             title=(
                 f"📊 {guild_name} "
-                f"Daily Donation Status"
+                f"Donation Status"
             ),
             description=(
-                f"**Daily Requirement:** "
+                f"**Daily requirement:** "
                 f"{format_amount(DAILY_REQUIREMENT)}\n"
-                f"**Status:** <t:{timestamp}:R>"
+                f"Updated <t:{timestamp}:R>"
             ),
             color=discord.Color.blurple()
         )
@@ -2235,7 +2571,7 @@ async def donationstatus(
 
 
         # =================================================
-        # COVERED LIST
+        # COVERED
         # =================================================
 
         if covered_members:
@@ -2245,8 +2581,8 @@ async def donationstatus(
 
             for (
                 member,
-                display_ign,
-                covered_through,
+                roblox_ign,
+                through,
                 balance
             ) in covered_members:
 
@@ -2257,14 +2593,13 @@ async def donationstatus(
 
 
                 if (
-                    covered_through
-                    and covered_through
-                    != get_today()
+                    through
+                    and through != get_today()
                 ):
 
-                    through = (
+                    pretty_date = (
                         datetime.strptime(
-                            covered_through,
+                            through,
                             "%Y-%m-%d"
                         )
                         .strftime(
@@ -2274,16 +2609,17 @@ async def donationstatus(
 
 
                     line += (
-                        f"  •  Paid through "
-                        f"**{through}**"
+                        f" • paid through "
+                        f"**{pretty_date}**"
                     )
 
 
                 if balance > 0:
 
                     line += (
-                        f"  •  "
-                        f"{format_amount(balance)} credit"
+                        f" • "
+                        f"{format_amount(balance)} "
+                        f"credit"
                     )
 
 
@@ -2297,7 +2633,7 @@ async def donationstatus(
                 ):
 
                     text += (
-                        "\n*More members not shown...*"
+                        "*More members not shown...*"
                     )
 
                     break
@@ -2317,13 +2653,13 @@ async def donationstatus(
 
             embed.add_field(
                 name="✅ Covered Today",
-                value="Nobody is covered yet.",
+                value="Nobody matched as covered.",
                 inline=False
             )
 
 
         # =================================================
-        # MISSING LIST
+        # MISSING
         # =================================================
 
         if missing_members:
@@ -2332,6 +2668,7 @@ async def donationstatus(
 
 
             for member in missing_members:
+
 
                 line = (
                     f"❌ {member.mention} "
@@ -2346,7 +2683,7 @@ async def donationstatus(
                 ):
 
                     text += (
-                        "\n*More members not shown...*"
+                        "*More members not shown...*"
                     )
 
                     break
@@ -2366,38 +2703,86 @@ async def donationstatus(
 
             embed.add_field(
                 name="❌ Missing Today's Donation",
-                value=(
-                    "🎉 **Everyone is covered today!**"
-                ),
+                value="🎉 **Everyone is covered!**",
                 inline=False
             )
 
 
         # =================================================
-        # UNMATCHED
+        # UNLINKED ROBLOX
         # =================================================
 
-        if unmatched:
+        if unlinked:
 
             text = ""
 
 
             for (
-                display_ign,
-                balance
-            ) in unmatched:
+                roblox_ign,
+                balance,
+                covered_today,
+                through
+            ) in unlinked:
+
+
+                if covered_today:
+
+                    icon = "🟢"
+
+                else:
+
+                    icon = "⚪"
 
 
                 line = (
-                    f"⚠️ **{display_ign}**"
+                    f"{icon} **{roblox_ign}**"
                 )
+
+
+                if covered_today:
+
+                    if (
+                        through
+                        and through != get_today()
+                    ):
+
+                        pretty = (
+                            datetime.strptime(
+                                through,
+                                "%Y-%m-%d"
+                            )
+                            .strftime(
+                                "%d %b"
+                            )
+                        )
+
+
+                        line += (
+                            f" • paid through "
+                            f"**{pretty}**"
+                        )
+
+
+                    else:
+
+                        line += (
+                            " • covered today"
+                        )
+
+
+                else:
+
+                    line += (
+                        " • not covered today"
+                    )
 
 
                 if balance > 0:
 
                     line += (
                         f" • "
-                        f"{format_amount(balance)} credit"
+                        f"{format_amount(balance)} "
+                        f"credit"
                     )
 
 
@@ -2410,6 +2795,11 @@ async def donationstatus(
                     > 1000
                 ):
 
+                    text += (
+                        "*More Roblox accounts "
+                        "not shown...*"
+                    )
+
                     break
 
 
@@ -2417,12 +2807,13 @@ async def donationstatus(
 
 
             embed.add_field(
-                name="⚠️ IGN Not Matched",
+                name="🎮 Unlinked Roblox Accounts",
                 value=(
                     text
                     +
-                    "\n*These IGNs could not be matched "
-                    "to a member with this guild role.*"
+                    "\n*Their donations are saved. "
+                    "The bot just doesn't know which "
+                    "Discord member owns the IGN.*"
                 ),
                 inline=False
             )
@@ -2430,8 +2821,8 @@ async def donationstatus(
 
         embed.set_footer(
             text=(
-                "100K = 1 day • Advance payments carry forward • "
-                "Duplicate logs are ignored"
+                "100K = 1 day • "
+                "Advance payments carry forward"
             )
         )
 
@@ -2501,7 +2892,7 @@ async def leaderboard(
     if not data:
 
         embed.description = (
-            "No donations have been recorded yet."
+            "No donations recorded."
         )
 
 
@@ -2528,7 +2919,9 @@ async def leaderboard(
 
             rank = (
                 medals[index - 1]
+
                 if index <= 3
+
                 else f"`#{index}`"
             )
 
@@ -2544,7 +2937,9 @@ async def leaderboard(
 
 
     embed.set_footer(
-        text="Lifetime donations across all recorded logs"
+        text=(
+            "Lifetime donation leaderboard"
+        )
     )
 
 
@@ -2554,7 +2949,7 @@ async def leaderboard(
 
 
 # =========================================================
-# START BOT
+# START
 # =========================================================
 
 if not TOKEN:
