@@ -137,10 +137,11 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
+    bot.tree.clear_commands(guild=None)
 
-    print(
-        f"Logged in as {bot.user}"
-    )
+    await bot.tree.sync()
+
+    print(f"Logged in as {bot.user}")
 
 
 
