@@ -6,8 +6,7 @@ from dotenv import load_dotenv
 import os
 import sqlite3
 import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 
 # =========================
@@ -18,7 +17,8 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 
-BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
+# YOUR DISCORD SERVER ID
+SERVER_ID = 1529030570410119259
 
 
 # =========================
@@ -41,7 +41,6 @@ GUILD_CHANNELS = {
 # =========================
 # GUILD ROLE IDS
 # =========================
-# REPLACE THESE WITH YOUR REAL ROLE IDS
 
 GUILD_ROLES = {
     "Guild 1": 1529033508750884935,
@@ -68,6 +67,7 @@ TRACKER_CHANNEL_ID = 1532339634829267149
 # =========================
 
 db = sqlite3.connect("donations.db")
+
 cursor = db.cursor()
 
 
@@ -89,16 +89,25 @@ db.commit()
 
 
 # =========================
-# TIME FUNCTIONS
+# GLOBAL / UTC TIME
 # =========================
 
+def get_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
 def get_today():
-    return datetime.now(BRISBANE_TZ).date().isoformat()
+
+    return get_now().date().isoformat()
 
 
 def get_current_time():
-    return datetime.now(BRISBANE_TZ).strftime(
-        "%d/%m/%Y %I:%M %p"
+
+    return get_now().strftime(
+        "%d/%m/%Y %I:%M %p UTC"
     )
 
 
@@ -187,29 +196,46 @@ def get_leaderboard(guild):
 def convert_amount(value):
 
     value = value.upper()
-    value = value.replace(",", "")
-    value = value.replace(" ", "")
+
+    value = value.replace(
+        ",",
+        ""
+    )
+
+    value = value.replace(
+        " ",
+        ""
+    )
 
     try:
 
         if value.endswith("B"):
+
             return int(
-                float(value[:-1]) * 1_000_000_000
+                float(value[:-1])
+                * 1_000_000_000
             )
 
         if value.endswith("M"):
+
             return int(
-                float(value[:-1]) * 1_000_000
+                float(value[:-1])
+                * 1_000_000
             )
 
         if value.endswith("K"):
+
             return int(
-                float(value[:-1]) * 1_000
+                float(value[:-1])
+                * 1_000
             )
 
-        return int(float(value))
+        return int(
+            float(value)
+        )
 
     except ValueError:
+
         return 0
 
 
@@ -230,14 +256,24 @@ def normalize_name(name):
 def get_member_names(member):
 
     names = {
-        normalize_name(member.display_name),
-        normalize_name(member.name)
+        normalize_name(
+            member.display_name
+        ),
+
+        normalize_name(
+            member.name
+        )
     }
 
+
     if member.global_name:
+
         names.add(
-            normalize_name(member.global_name)
+            normalize_name(
+                member.global_name
+            )
         )
+
 
     return names
 
@@ -250,9 +286,7 @@ intents = discord.Intents.default()
 
 intents.message_content = True
 
-# IMPORTANT:
-# Required so the bot can see everybody
-# who has each guild role.
+# Needed to see everyone with guild roles
 intents.members = True
 
 
@@ -267,38 +301,47 @@ bot = commands.Bot(
 # =========================
 
 GUILD_CHOICES = [
+
     app_commands.Choice(
         name="Guild 1",
         value="Guild 1"
     ),
+
     app_commands.Choice(
         name="Guild 2",
         value="Guild 2"
     ),
+
     app_commands.Choice(
         name="Guild 3",
         value="Guild 3"
     ),
+
     app_commands.Choice(
         name="Guild 4",
         value="Guild 4"
     ),
+
     app_commands.Choice(
         name="Guild 5",
         value="Guild 5"
     ),
+
     app_commands.Choice(
         name="Guild 6",
         value="Guild 6"
     ),
+
     app_commands.Choice(
         name="Guild 7",
         value="Guild 7"
     ),
+
     app_commands.Choice(
         name="Guild 8",
         value="Guild 8"
     ),
+
     app_commands.Choice(
         name="Guild 9",
         value="Guild 9"
@@ -317,10 +360,23 @@ async def on_ready():
         f"Logged in as {bot.user}"
     )
 
-    synced = await bot.tree.sync()
+    guild = discord.Object(
+        id=SERVER_ID
+    )
+
+    # Copy commands directly to this server.
+    # This makes command updates appear faster.
+    bot.tree.copy_global_to(
+        guild=guild
+    )
+
+    synced = await bot.tree.sync(
+        guild=guild
+    )
 
     print(
-        f"Synced {len(synced)} commands"
+        f"Synced {len(synced)} commands "
+        f"to server {SERVER_ID}"
     )
 
 
@@ -351,47 +407,69 @@ async def donationstatus(
         guild_name
     )
 
+
+    # =========================
+    # CHECK ROLE CONFIG
+    # =========================
+
     if role_id is None:
 
         await interaction.followup.send(
-            "❌ No role has been configured for this guild."
+            "❌ No role has been configured "
+            "for this guild."
         )
 
         return
 
+
     discord_guild = interaction.guild
+
 
     if discord_guild is None:
 
         await interaction.followup.send(
-            "❌ This command must be used inside the server."
+            "❌ This command must be used "
+            "inside the server."
         )
 
         return
+
 
     role = discord_guild.get_role(
         role_id
     )
 
+
     if role is None:
 
         await interaction.followup.send(
-            f"❌ I couldn't find the role for **{guild_name}**.\n"
+            f"❌ I couldn't find the role for "
+            f"**{guild_name}**.\n"
             "Check the role ID in the code."
         )
 
         return
 
 
-    # All members with this guild role
+    # =========================
+    # GET EVERY MEMBER
+    # WITH THAT GUILD ROLE
+    # =========================
+
     members = [
+
         member
+
         for member in role.members
+
         if not member.bot
     ]
 
 
-    # Today's donations
+    # =========================
+    # GET TODAY'S DONATIONS
+    # =========================
+
     donations = donated_today(
         guild_name
     )
@@ -399,10 +477,13 @@ async def donationstatus(
 
     donation_lookup = {}
 
+
     for donation_ign, amount in donations:
 
         donation_lookup[
-            normalize_name(donation_ign)
+            normalize_name(
+                donation_ign
+            )
         ] = (
             donation_ign,
             amount
@@ -410,15 +491,18 @@ async def donationstatus(
 
 
     donated_members = []
+
     missing_members = []
+
     unmatched_donations = []
 
 
-    # =========================
-    # CHECK EACH ROLE MEMBER
-    # =========================
-
     matched_igns = set()
+
+
+    # =========================
+    # CHECK EVERY MEMBER
+    # =========================
 
     for member in members:
 
@@ -428,16 +512,22 @@ async def donationstatus(
 
         found = None
 
+
         for name in possible_names:
 
             if name in donation_lookup:
-                found = donation_lookup[name]
+
+                found = donation_lookup[
+                    name
+                ]
+
                 break
 
 
         if found:
 
             donation_ign, amount = found
+
 
             donated_members.append(
                 (
@@ -447,9 +537,13 @@ async def donationstatus(
                 )
             )
 
+
             matched_igns.add(
-                normalize_name(donation_ign)
+                normalize_name(
+                    donation_ign
+                )
             )
+
 
         else:
 
@@ -458,7 +552,10 @@ async def donationstatus(
             )
 
 
-    # Donations where IGN did not match a Discord member
+    # =========================
+    # FIND UNMATCHED DONATIONS
+    # =========================
+
     for normalized_ign, data in donation_lookup.items():
 
         if normalized_ign not in matched_igns:
@@ -469,42 +566,59 @@ async def donationstatus(
 
 
     # =========================
-    # CREATE EMBED
+    # CREATE STATUS EMBED
     # =========================
+
+    today_display = get_now().strftime(
+        "%d %B %Y"
+    )
+
 
     embed = discord.Embed(
         title=f"📊 {guild_name} Donation Status",
-        description=f"Donation status for **{datetime.now(BRISBANE_TZ).strftime('%d %B %Y')}**",
+        description=(
+            f"Donation status for "
+            f"**{today_display} (UTC)**"
+        ),
         color=discord.Color.blue()
     )
 
 
     embed.add_field(
         name="👥 Guild Members",
-        value=str(len(members)),
+        value=str(
+            len(members)
+        ),
         inline=True
     )
+
 
     embed.add_field(
         name="✅ Donated",
-        value=str(len(donated_members)),
+        value=str(
+            len(donated_members)
+        ),
         inline=True
     )
 
+
     embed.add_field(
         name="❌ Missing",
-        value=str(len(missing_members)),
+        value=str(
+            len(missing_members)
+        ),
         inline=True
     )
 
 
     # =========================
-    # DONATED LIST
+    # DONATED MEMBERS
     # =========================
 
     if donated_members:
 
         donated_text = ""
+
 
         for member, ign, amount in donated_members:
 
@@ -513,10 +627,22 @@ async def donationstatus(
                 f"{amount:,}\n"
             )
 
-            if len(donated_text) + len(line) > 1000:
+
+            if (
+                len(donated_text)
+                + len(line)
+                > 1000
+            ):
+
+                donated_text += (
+                    "\n*More donors not shown...*"
+                )
+
                 break
 
+
             donated_text += line
+
 
         embed.add_field(
             name="✅ Donated Today",
@@ -524,22 +650,27 @@ async def donationstatus(
             inline=False
         )
 
+
     else:
 
         embed.add_field(
             name="✅ Donated Today",
-            value="Nobody has been matched yet.",
+            value=(
+                "Nobody has been "
+                "matched yet."
+            ),
             inline=False
         )
 
 
     # =========================
-    # MISSING LIST
+    # MISSING MEMBERS
     # =========================
 
     if missing_members:
 
         missing_text = ""
+
 
         for member in missing_members:
 
@@ -548,11 +679,23 @@ async def donationstatus(
                 f"({member.display_name})\n"
             )
 
-            if len(missing_text) + len(line) > 1000:
-                missing_text += "\n*More members not shown...*"
+
+            if (
+                len(missing_text)
+                + len(line)
+                > 1000
+            ):
+
+                missing_text += (
+                    "\n*More members "
+                    "not shown...*"
+                )
+
                 break
 
+
             missing_text += line
+
 
         embed.add_field(
             name="❌ Not Donated Today",
@@ -560,11 +703,14 @@ async def donationstatus(
             inline=False
         )
 
+
     else:
 
         embed.add_field(
             name="❌ Not Donated Today",
-            value="🎉 Everyone has donated!",
+            value=(
+                "🎉 Everyone has donated!"
+            ),
             inline=False
         )
 
@@ -577,6 +723,7 @@ async def donationstatus(
 
         unmatched_text = ""
 
+
         for ign, amount in unmatched_donations:
 
             line = (
@@ -584,24 +731,38 @@ async def donationstatus(
                 f"{amount:,}\n"
             )
 
-            if len(unmatched_text) + len(line) > 1000:
+
+            if (
+                len(unmatched_text)
+                + len(line)
+                > 1000
+            ):
+
+                unmatched_text += (
+                    "\n*More not shown...*"
+                )
+
                 break
 
+
             unmatched_text += line
+
 
         embed.add_field(
             name="⚠️ IGN Not Matched to Discord",
             value=(
-                unmatched_text +
-                "\nThese players donated, but their IGN "
-                "doesn't match a Discord nickname/username."
+                unmatched_text
+                +
+                "\nThese players donated, "
+                "but their IGN does not match "
+                "their Discord nickname or username."
             ),
             inline=False
         )
 
 
     embed.set_footer(
-        text="Times are based on Brisbane time"
+        text="Donation day resets at 00:00 UTC"
     )
 
 
@@ -635,7 +796,10 @@ async def leaderboard(
 
 
     embed = discord.Embed(
-        title=f"🏆 {guild.value} Donation Leaderboard",
+        title=(
+            f"🏆 {guild.value} "
+            f"Donation Leaderboard"
+        ),
         color=discord.Color.gold()
     )
 
@@ -646,9 +810,11 @@ async def leaderboard(
             "No donations recorded yet."
         )
 
+
     else:
 
         text = ""
+
 
         medals = [
             "🥇",
@@ -663,12 +829,23 @@ async def leaderboard(
         ):
 
             ign = row[0]
+
             amount = row[1]
 
+
             if index <= 3:
-                rank = medals[index - 1]
+
+                rank = medals[
+                    index - 1
+                ]
+
+
             else:
-                rank = f"**#{index}**"
+
+                rank = (
+                    f"**#{index}**"
+                )
+
 
             text += (
                 f"{rank} **{ign}** — "
@@ -701,7 +878,7 @@ async def on_message(message):
         return
 
 
-    # Only monitor the 9 guild log channels
+    # Only monitor the 9 guild channels
     if message.channel.id not in GUILD_CHANNELS:
         return
 
@@ -710,7 +887,7 @@ async def on_message(message):
 
 
     # =========================
-    # READ DONATION FORMAT
+    # READ DONATION LOG
     # =========================
 
     ign_match = re.search(
@@ -719,17 +896,20 @@ async def on_message(message):
         re.IGNORECASE
     )
 
+
     previous_match = re.search(
         r"Previous Guild Gold:\s*(.+)",
         text,
         re.IGNORECASE
     )
 
+
     current_match = re.search(
         r"Current Guild Gold:\s*(.+)",
         text,
         re.IGNORECASE
     )
+
 
     donation_match = re.search(
         r"Daily Donation:\s*(.+)",
@@ -738,30 +918,51 @@ async def on_message(message):
     )
 
 
-    # Not a valid donation log
-    if not ign_match or not donation_match:
+    # Ignore normal messages
+    if (
+        not ign_match
+        or not donation_match
+    ):
+
         return
 
 
-    ign = ign_match.group(1).strip()
+    ign = (
+        ign_match
+        .group(1)
+        .strip()
+    )
 
 
     previous = (
-        previous_match.group(1).strip()
+
+        previous_match
+        .group(1)
+        .strip()
+
         if previous_match
+
         else "Unknown"
     )
 
 
     current = (
-        current_match.group(1).strip()
+
+        current_match
+        .group(1)
+        .strip()
+
         if current_match
+
         else "Unknown"
     )
 
 
     donation_text = (
-        donation_match.group(1).strip()
+
+        donation_match
+        .group(1)
+        .strip()
     )
 
 
@@ -770,10 +971,12 @@ async def on_message(message):
     )
 
 
+    # Invalid donation amount
     if donation_amount <= 0:
 
         print(
-            f"Invalid donation amount: {donation_text}"
+            f"Invalid donation amount: "
+            f"{donation_text}"
         )
 
         return
@@ -811,7 +1014,7 @@ async def on_message(message):
 
 
     # =========================
-    # TRACKER CHANNEL
+    # GET TRACKER CHANNEL
     # =========================
 
     tracker = bot.get_channel(
@@ -827,10 +1030,12 @@ async def on_message(message):
                 TRACKER_CHANNEL_ID
             )
 
+
         except Exception as e:
 
             print(
-                f"Could not find tracker channel: {e}"
+                f"Could not find "
+                f"tracker channel: {e}"
             )
 
             return
@@ -917,6 +1122,7 @@ try:
     bot.run(
         TOKEN
     )
+
 
 except Exception as e:
 
