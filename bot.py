@@ -672,4 +672,8 @@ async def on_message(message):
 # =========================
 
 
-bot.run(TOKEN)
+try:
+    bot.run(TOKEN)
+except Exception as e:
+    print("BOT CRASHED:")
+    print(e)
