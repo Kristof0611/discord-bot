@@ -9,21 +9,21 @@ import re
 from datetime import datetime, timezone
 
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 
-# YOUR DISCORD SERVER ID
+# Discord Server ID
 SERVER_ID = 1529030570410119259
 
 
-# =========================
+# =========================================================
 # GUILD DONATION CHANNELS
-# =========================
+# =========================================================
 
 GUILD_CHANNELS = {
     1530941934753812651: "Guild 1",
@@ -38,9 +38,9 @@ GUILD_CHANNELS = {
 }
 
 
-# =========================
+# =========================================================
 # GUILD ROLE IDS
-# =========================
+# =========================================================
 
 GUILD_ROLES = {
     "Guild 1": 1529033508750884935,
@@ -55,16 +55,16 @@ GUILD_ROLES = {
 }
 
 
-# =========================
+# =========================================================
 # TRACKER CHANNEL
-# =========================
+# =========================================================
 
 TRACKER_CHANNEL_ID = 1532339634829267149
 
 
-# =========================
+# =========================================================
 # DATABASE
-# =========================
+# =========================================================
 
 db = sqlite3.connect("donations.db")
 
@@ -88,9 +88,9 @@ CREATE TABLE IF NOT EXISTS donations (
 db.commit()
 
 
-# =========================
-# GLOBAL / UTC TIME
-# =========================
+# =========================================================
+# GLOBAL TIME
+# =========================================================
 
 def get_now():
 
@@ -104,16 +104,16 @@ def get_today():
     return get_now().date().isoformat()
 
 
-def get_current_time():
+def get_timestamp():
 
-    return get_now().strftime(
-        "%d/%m/%Y %I:%M %p UTC"
+    return int(
+        get_now().timestamp()
     )
 
 
-# =========================
+# =========================================================
 # DATABASE FUNCTIONS
-# =========================
+# =========================================================
 
 def save_donation(
     guild,
@@ -122,7 +122,7 @@ def save_donation(
     current,
     donation,
     logged_by,
-    time
+    timestamp
 ):
 
     today = get_today()
@@ -148,7 +148,7 @@ def save_donation(
         current,
         donation,
         logged_by,
-        time,
+        str(timestamp),
         today
     ))
 
@@ -189,9 +189,9 @@ def get_leaderboard(guild):
     return cursor.fetchall()
 
 
-# =========================
+# =========================================================
 # NUMBER CONVERTER
-# =========================
+# =========================================================
 
 def convert_amount(value):
 
@@ -239,9 +239,9 @@ def convert_amount(value):
         return 0
 
 
-# =========================
+# =========================================================
 # NAME MATCHING
-# =========================
+# =========================================================
 
 def normalize_name(name):
 
@@ -278,15 +278,15 @@ def get_member_names(member):
     return names
 
 
-# =========================
+# =========================================================
 # BOT SETUP
-# =========================
+# =========================================================
 
 intents = discord.Intents.default()
 
 intents.message_content = True
 
-# Needed to see everyone with guild roles
+# Needed for guild-role member checking
 intents.members = True
 
 
@@ -296,9 +296,9 @@ bot = commands.Bot(
 )
 
 
-# =========================
-# GUILD CHOICES
-# =========================
+# =========================================================
+# GUILD OPTIONS
+# =========================================================
 
 GUILD_CHOICES = [
 
@@ -349,9 +349,9 @@ GUILD_CHOICES = [
 ]
 
 
-# =========================
+# =========================================================
 # READY EVENT
-# =========================
+# =========================================================
 
 @bot.event
 async def on_ready():
@@ -364,8 +364,8 @@ async def on_ready():
         id=SERVER_ID
     )
 
-    # Copy commands directly to this server.
-    # This makes command updates appear faster.
+    # Copy global commands into this server
+    # so changes appear almost immediately.
     bot.tree.copy_global_to(
         guild=guild
     )
@@ -380,9 +380,9 @@ async def on_ready():
     )
 
 
-# =========================
+# =========================================================
 # DONATION STATUS COMMAND
-# =========================
+# =========================================================
 
 @bot.tree.command(
     name="donationstatus",
@@ -403,14 +403,15 @@ async def donationstatus(
 
     guild_name = guild.value
 
+
+    # =====================================================
+    # GET ROLE
+    # =====================================================
+
     role_id = GUILD_ROLES.get(
         guild_name
     )
 
-
-    # =========================
-    # CHECK ROLE CONFIG
-    # =========================
 
     if role_id is None:
 
@@ -429,7 +430,7 @@ async def donationstatus(
 
         await interaction.followup.send(
             "❌ This command must be used "
-            "inside the server."
+            "inside the Discord server."
         )
 
         return
@@ -451,10 +452,9 @@ async def donationstatus(
         return
 
 
-    # =========================
-    # GET EVERY MEMBER
-    # WITH THAT GUILD ROLE
-    # =========================
+    # =====================================================
+    # GET MEMBERS WITH THE ROLE
+    # =====================================================
 
     members = [
 
@@ -466,9 +466,9 @@ async def donationstatus(
     ]
 
 
-    # =========================
+    # =====================================================
     # GET TODAY'S DONATIONS
-    # =========================
+    # =====================================================
 
     donations = donated_today(
         guild_name
@@ -496,13 +496,12 @@ async def donationstatus(
 
     unmatched_donations = []
 
-
     matched_igns = set()
 
 
-    # =========================
-    # CHECK EVERY MEMBER
-    # =========================
+    # =====================================================
+    # MATCH ROLE MEMBERS TO IGN
+    # =====================================================
 
     for member in members:
 
@@ -552,9 +551,9 @@ async def donationstatus(
             )
 
 
-    # =========================
-    # FIND UNMATCHED DONATIONS
-    # =========================
+    # =====================================================
+    # UNMATCHED IGNS
+    # =====================================================
 
     for normalized_ign, data in donation_lookup.items():
 
@@ -565,20 +564,21 @@ async def donationstatus(
             )
 
 
-    # =========================
-    # CREATE STATUS EMBED
-    # =========================
+    # =====================================================
+    # STATUS EMBED
+    # =====================================================
 
-    today_display = get_now().strftime(
-        "%d %B %Y"
-    )
+    current_timestamp = get_timestamp()
 
 
     embed = discord.Embed(
-        title=f"📊 {guild_name} Donation Status",
+        title=(
+            f"📊 {guild_name} "
+            f"Donation Status"
+        ),
         description=(
-            f"Donation status for "
-            f"**{today_display} (UTC)**"
+            "Today's guild donation status\n"
+            f"Checked: <t:{current_timestamp}:F>"
         ),
         color=discord.Color.blue()
     )
@@ -611,9 +611,9 @@ async def donationstatus(
     )
 
 
-    # =========================
-    # DONATED MEMBERS
-    # =========================
+    # =====================================================
+    # DONATED LIST
+    # =====================================================
 
     if donated_members:
 
@@ -656,16 +656,15 @@ async def donationstatus(
         embed.add_field(
             name="✅ Donated Today",
             value=(
-                "Nobody has been "
-                "matched yet."
+                "Nobody has been matched yet."
             ),
             inline=False
         )
 
 
-    # =========================
-    # MISSING MEMBERS
-    # =========================
+    # =====================================================
+    # MISSING LIST
+    # =====================================================
 
     if missing_members:
 
@@ -715,9 +714,9 @@ async def donationstatus(
         )
 
 
-    # =========================
-    # UNMATCHED IGNS
-    # =========================
+    # =====================================================
+    # UNMATCHED DONATIONS
+    # =====================================================
 
     if unmatched_donations:
 
@@ -755,14 +754,18 @@ async def donationstatus(
                 +
                 "\nThese players donated, "
                 "but their IGN does not match "
-                "their Discord nickname or username."
+                "their Discord display name "
+                "or username."
             ),
             inline=False
         )
 
 
     embed.set_footer(
-        text="Donation day resets at 00:00 UTC"
+        text=(
+            "Daily donation status resets "
+            "at 00:00 UTC"
+        )
     )
 
 
@@ -771,9 +774,9 @@ async def donationstatus(
     )
 
 
-# =========================
+# =========================================================
 # LEADERBOARD COMMAND
-# =========================
+# =========================================================
 
 @bot.tree.command(
     name="leaderboard",
@@ -848,7 +851,8 @@ async def leaderboard(
 
 
             text += (
-                f"{rank} **{ign}** — "
+                f"{rank} "
+                f"**{ign}** — "
                 f"{amount:,}\n"
             )
 
@@ -856,14 +860,27 @@ async def leaderboard(
         embed.description = text
 
 
+    current_timestamp = get_timestamp()
+
+
+    embed.add_field(
+        name="Updated",
+        value=(
+            f"<t:{current_timestamp}:F>\n"
+            f"<t:{current_timestamp}:R>"
+        ),
+        inline=False
+    )
+
+
     await interaction.response.send_message(
         embed=embed
     )
 
 
-# =========================
+# =========================================================
 # AUTOMATIC DONATION READER
-# =========================
+# =========================================================
 
 @bot.event
 async def on_message(message):
@@ -873,22 +890,24 @@ async def on_message(message):
     )
 
 
-    # Ignore bot messages
+    # Ignore messages sent by bots
     if message.author.bot:
+
         return
 
 
-    # Only monitor the 9 guild channels
+    # Only monitor the 9 donation channels
     if message.channel.id not in GUILD_CHANNELS:
+
         return
 
 
     text = message.content
 
 
-    # =========================
-    # READ DONATION LOG
-    # =========================
+    # =====================================================
+    # READ DONATION FORMAT
+    # =====================================================
 
     ign_match = re.search(
         r"IGN:\s*(.+)",
@@ -918,7 +937,7 @@ async def on_message(message):
     )
 
 
-    # Ignore normal messages
+    # Not a donation log
     if (
         not ign_match
         or not donation_match
@@ -926,6 +945,10 @@ async def on_message(message):
 
         return
 
+
+    # =====================================================
+    # GET VALUES
+    # =====================================================
 
     ign = (
         ign_match
@@ -971,7 +994,7 @@ async def on_message(message):
     )
 
 
-    # Invalid donation amount
+    # Ignore invalid amounts
     if donation_amount <= 0:
 
         print(
@@ -987,12 +1010,12 @@ async def on_message(message):
     ]
 
 
-    current_time = get_current_time()
+    timestamp = get_timestamp()
 
 
-    # =========================
+    # =====================================================
     # SAVE DONATION
-    # =========================
+    # =====================================================
 
     save_donation(
         guild_name,
@@ -1001,7 +1024,7 @@ async def on_message(message):
         current,
         donation_amount,
         message.author.display_name,
-        current_time
+        timestamp
     )
 
 
@@ -1013,9 +1036,9 @@ async def on_message(message):
     )
 
 
-    # =========================
+    # =====================================================
     # GET TRACKER CHANNEL
-    # =========================
+    # =====================================================
 
     tracker = bot.get_channel(
         TRACKER_CHANNEL_ID
@@ -1041,9 +1064,9 @@ async def on_message(message):
             return
 
 
-    # =========================
+    # =====================================================
     # TRACKER EMBED
-    # =========================
+    # =====================================================
 
     embed = discord.Embed(
         title="💰 Guild Donation Logged",
@@ -1082,8 +1105,8 @@ async def on_message(message):
     embed.add_field(
         name="Daily Donation",
         value=(
-            f"**{donation_text}** "
-            f"({donation_amount:,})"
+            f"**{donation_text}**\n"
+            f"`{donation_amount:,}`"
         ),
         inline=False
     )
@@ -1092,19 +1115,37 @@ async def on_message(message):
     embed.add_field(
         name="Logged By",
         value=message.author.mention,
-        inline=False
+        inline=True
+    )
+
+
+    # Discord automatically converts this
+    # into each person's local timezone.
+    embed.add_field(
+        name="Time Logged",
+        value=(
+            f"<t:{timestamp}:F>\n"
+            f"<t:{timestamp}:R>"
+        ),
+        inline=True
     )
 
 
     embed.add_field(
         name="Original Log",
-        value=message.jump_url,
+        value=(
+            f"[Jump to message]"
+            f"({message.jump_url})"
+        ),
         inline=False
     )
 
 
     embed.set_footer(
-        text=current_time
+        text=(
+            "Time automatically displays "
+            "in your local timezone"
+        )
     )
 
 
@@ -1113,9 +1154,17 @@ async def on_message(message):
     )
 
 
-# =========================
+# =========================================================
 # START BOT
-# =========================
+# =========================================================
+
+if not TOKEN:
+
+    raise RuntimeError(
+        "TOKEN was not found. "
+        "Check your Railway environment variables."
+    )
+
 
 try:
 
