@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 import os
 import sqlite3
 import re
-from datetime import datetime, date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 # =========================
@@ -17,8 +18,13 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 
+BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
 
-# YOUR GUILD DONATION CHANNELS
+
+# =========================
+# GUILD DONATION CHANNELS
+# =========================
+
 GUILD_CHANNELS = {
     1530941934753812651: "Guild 1",
     1530941966836043836: "Guild 2",
@@ -32,9 +38,29 @@ GUILD_CHANNELS = {
 }
 
 
-# TRACKER CHANNEL
-TRACKER_CHANNEL_ID = 1532339634829267149
+# =========================
+# GUILD ROLE IDS
+# =========================
+# REPLACE THESE WITH YOUR REAL ROLE IDS
 
+GUILD_ROLES = {
+    "Guild 1": 1529033508750884935,
+    "Guild 2": 1529329932528910366,
+    "Guild 3": 1529330155095593061,
+    "Guild 4": 1529547406264242236,
+    "Guild 5": 1530476999158796349,
+    "Guild 6": 1531198563609088062,
+    "Guild 7": 1531853188645261430,
+    "Guild 8": 1532934229854257332,
+    "Guild 9": 1533320139393601626,
+}
+
+
+# =========================
+# TRACKER CHANNEL
+# =========================
+
+TRACKER_CHANNEL_ID = 1532339634829267149
 
 
 # =========================
@@ -42,60 +68,43 @@ TRACKER_CHANNEL_ID = 1532339634829267149
 # =========================
 
 db = sqlite3.connect("donations.db")
-
 cursor = db.cursor()
 
 
-# Donation history
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS donations (
-
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
     guild TEXT,
-
     ign TEXT,
-
     previous_gold TEXT,
-
     current_gold TEXT,
-
     donation INTEGER,
-
     logged_by TEXT,
-
     time TEXT,
-
     day TEXT
-
 )
 """)
-
-
-# Guild member roster
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS members (
-
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-    guild TEXT,
-
-    ign TEXT
-
-)
-""")
-
 
 db.commit()
 
+
+# =========================
+# TIME FUNCTIONS
+# =========================
+
+def get_today():
+    return datetime.now(BRISBANE_TZ).date().isoformat()
+
+
+def get_current_time():
+    return datetime.now(BRISBANE_TZ).strftime(
+        "%d/%m/%Y %I:%M %p"
+    )
 
 
 # =========================
 # DATABASE FUNCTIONS
 # =========================
-
 
 def save_donation(
     guild,
@@ -107,8 +116,7 @@ def save_donation(
     time
 ):
 
-    today = str(date.today())
-
+    today = get_today()
 
     cursor.execute("""
     INSERT INTO donations
@@ -122,9 +130,7 @@ def save_donation(
         time,
         day
     )
-
     VALUES (?,?,?,?,?,?,?,?)
-
     """,
     (
         guild,
@@ -137,130 +143,103 @@ def save_donation(
         today
     ))
 
-
     db.commit()
-
-
-
-def add_member(guild, ign):
-
-    cursor.execute("""
-    INSERT INTO members
-    (
-        guild,
-        ign
-    )
-
-    VALUES (?,?)
-
-    """,
-    (
-        guild,
-        ign
-    ))
-
-
-    db.commit()
-
-
-
-def remove_member(guild, ign):
-
-    cursor.execute("""
-    DELETE FROM members
-    WHERE guild=? AND ign=?
-
-    """,
-    (
-        guild,
-        ign
-    ))
-
-
-    db.commit()
-
-
-
-def get_members(guild):
-
-    cursor.execute("""
-    SELECT ign
-    FROM members
-    WHERE guild=?
-
-    """,
-    (guild,))
-
-
-    return [
-        x[0]
-        for x in cursor.fetchall()
-    ]
-
 
 
 def donated_today(guild):
 
-    today = str(date.today())
-
+    today = get_today()
 
     cursor.execute("""
-    SELECT ign, donation
+    SELECT ign, SUM(donation)
     FROM donations
     WHERE guild=? AND day=?
-
+    GROUP BY LOWER(ign)
+    ORDER BY SUM(donation) DESC
     """,
     (
         guild,
         today
     ))
 
-
     return cursor.fetchall()
-
 
 
 def get_leaderboard(guild):
 
     cursor.execute("""
     SELECT ign, SUM(donation)
-
     FROM donations
-
     WHERE guild=?
-
-    GROUP BY ign
-
+    GROUP BY LOWER(ign)
     ORDER BY SUM(donation) DESC
-
     LIMIT 10
-
     """,
     (guild,))
 
-
     return cursor.fetchall()
-    # =========================
+
+
+# =========================
 # NUMBER CONVERTER
 # =========================
 
 def convert_amount(value):
 
-    value = value.upper().replace(",", "")
+    value = value.upper()
+    value = value.replace(",", "")
+    value = value.replace(" ", "")
 
     try:
 
-        if "M" in value:
-            return int(float(value.replace("M", "")) * 1000000)
+        if value.endswith("B"):
+            return int(
+                float(value[:-1]) * 1_000_000_000
+            )
 
-        if "K" in value:
-            return int(float(value.replace("K", "")) * 1000)
+        if value.endswith("M"):
+            return int(
+                float(value[:-1]) * 1_000_000
+            )
 
-        return int(value)
+        if value.endswith("K"):
+            return int(
+                float(value[:-1]) * 1_000
+            )
 
-    except:
+        return int(float(value))
+
+    except ValueError:
         return 0
 
+
+# =========================
+# NAME MATCHING
+# =========================
+
+def normalize_name(name):
+
+    return (
+        name
+        .strip()
+        .lower()
+        .replace(" ", "")
+    )
+
+
+def get_member_names(member):
+
+    names = {
+        normalize_name(member.display_name),
+        normalize_name(member.name)
+    }
+
+    if member.global_name:
+        names.add(
+            normalize_name(member.global_name)
+        )
+
+    return names
 
 
 # =========================
@@ -271,6 +250,11 @@ intents = discord.Intents.default()
 
 intents.message_content = True
 
+# IMPORTANT:
+# Required so the bot can see everybody
+# who has each guild role.
+intents.members = True
+
 
 bot = commands.Bot(
     command_prefix="!",
@@ -278,244 +262,446 @@ bot = commands.Bot(
 )
 
 
+# =========================
+# GUILD CHOICES
+# =========================
+
+GUILD_CHOICES = [
+    app_commands.Choice(
+        name="Guild 1",
+        value="Guild 1"
+    ),
+    app_commands.Choice(
+        name="Guild 2",
+        value="Guild 2"
+    ),
+    app_commands.Choice(
+        name="Guild 3",
+        value="Guild 3"
+    ),
+    app_commands.Choice(
+        name="Guild 4",
+        value="Guild 4"
+    ),
+    app_commands.Choice(
+        name="Guild 5",
+        value="Guild 5"
+    ),
+    app_commands.Choice(
+        name="Guild 6",
+        value="Guild 6"
+    ),
+    app_commands.Choice(
+        name="Guild 7",
+        value="Guild 7"
+    ),
+    app_commands.Choice(
+        name="Guild 8",
+        value="Guild 8"
+    ),
+    app_commands.Choice(
+        name="Guild 9",
+        value="Guild 9"
+    ),
+]
+
+
+# =========================
+# READY EVENT
+# =========================
 
 @bot.event
 async def on_ready():
 
-    print(f"Logged in as {bot.user}")
+    print(
+        f"Logged in as {bot.user}"
+    )
 
     synced = await bot.tree.sync()
 
-    print(f"Synced {len(synced)} commands")
-
-
-
-# =========================
-# ADD MEMBER COMMAND
-# =========================
-
-
-@bot.tree.command(
-    name="addmember",
-    description="Add a member to a guild roster"
-)
-@app_commands.describe(
-    guild="Guild name",
-    ign="Player IGN"
-)
-async def addmember(
-    interaction: discord.Interaction,
-    guild: str,
-    ign: str
-):
-
-    add_member(
-        guild,
-        ign
+    print(
+        f"Synced {len(synced)} commands"
     )
 
 
-    await interaction.response.send_message(
-        f"✅ Added **{ign}** to **{guild}** roster"
-    )
-
-
-
 # =========================
-# REMOVE MEMBER COMMAND
+# DONATION STATUS COMMAND
 # =========================
-
-
-@bot.tree.command(
-    name="removemember",
-    description="Remove a member from roster"
-)
-@app_commands.describe(
-    guild="Guild name",
-    ign="Player IGN"
-)
-async def removemember(
-    interaction: discord.Interaction,
-    guild: str,
-    ign: str
-):
-
-    remove_member(
-        guild,
-        ign
-    )
-
-
-    await interaction.response.send_message(
-        f"🗑️ Removed **{ign}** from **{guild}**"
-    )
-
-
-
-# =========================
-# DONATION STATUS
-# =========================
-
 
 @bot.tree.command(
     name="donationstatus",
-    description="Show who donated and who did not"
+    description="See who donated and who has not donated today"
 )
 @app_commands.describe(
-    guild="Guild name"
+    guild="Choose a guild"
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
 )
 async def donationstatus(
     interaction: discord.Interaction,
-    guild: str
+    guild: app_commands.Choice[str]
 ):
 
+    await interaction.response.defer()
 
-    members = get_members(guild)
+    guild_name = guild.value
+
+    role_id = GUILD_ROLES.get(
+        guild_name
+    )
+
+    if role_id is None:
+
+        await interaction.followup.send(
+            "❌ No role has been configured for this guild."
+        )
+
+        return
+
+    discord_guild = interaction.guild
+
+    if discord_guild is None:
+
+        await interaction.followup.send(
+            "❌ This command must be used inside the server."
+        )
+
+        return
+
+    role = discord_guild.get_role(
+        role_id
+    )
+
+    if role is None:
+
+        await interaction.followup.send(
+            f"❌ I couldn't find the role for **{guild_name}**.\n"
+            "Check the role ID in the code."
+        )
+
+        return
 
 
-    donated = donated_today(guild)
-
-
-    donated_names = [
-        x[0]
-        for x in donated
+    # All members with this guild role
+    members = [
+        member
+        for member in role.members
+        if not member.bot
     ]
 
 
-    embed = discord.Embed(
-        title=f"📊 {guild} Donation Status",
-        color=discord.Color.blue()
+    # Today's donations
+    donations = donated_today(
+        guild_name
     )
 
 
-    yes = ""
+    donation_lookup = {}
 
-    no = ""
+    for donation_ign, amount in donations:
 
+        donation_lookup[
+            normalize_name(donation_ign)
+        ] = (
+            donation_ign,
+            amount
+        )
+
+
+    donated_members = []
+    missing_members = []
+    unmatched_donations = []
+
+
+    # =========================
+    # CHECK EACH ROLE MEMBER
+    # =========================
+
+    matched_igns = set()
 
     for member in members:
 
-        if member in donated_names:
+        possible_names = get_member_names(
+            member
+        )
 
-            amount = next(
-                x[1]
-                for x in donated
-                if x[0] == member
+        found = None
+
+        for name in possible_names:
+
+            if name in donation_lookup:
+                found = donation_lookup[name]
+                break
+
+
+        if found:
+
+            donation_ign, amount = found
+
+            donated_members.append(
+                (
+                    member,
+                    donation_ign,
+                    amount
+                )
             )
 
-            yes += (
-                f"✅ {member} "
-                f"- {amount:,}\n"
+            matched_igns.add(
+                normalize_name(donation_ign)
             )
 
         else:
 
-            no += (
-                f"❌ {member}\n"
+            missing_members.append(
+                member
             )
 
 
-    if yes:
+    # Donations where IGN did not match a Discord member
+    for normalized_ign, data in donation_lookup.items():
+
+        if normalized_ign not in matched_igns:
+
+            unmatched_donations.append(
+                data
+            )
+
+
+    # =========================
+    # CREATE EMBED
+    # =========================
+
+    embed = discord.Embed(
+        title=f"📊 {guild_name} Donation Status",
+        description=f"Donation status for **{datetime.now(BRISBANE_TZ).strftime('%d %B %Y')}**",
+        color=discord.Color.blue()
+    )
+
+
+    embed.add_field(
+        name="👥 Guild Members",
+        value=str(len(members)),
+        inline=True
+    )
+
+    embed.add_field(
+        name="✅ Donated",
+        value=str(len(donated_members)),
+        inline=True
+    )
+
+    embed.add_field(
+        name="❌ Missing",
+        value=str(len(missing_members)),
+        inline=True
+    )
+
+
+    # =========================
+    # DONATED LIST
+    # =========================
+
+    if donated_members:
+
+        donated_text = ""
+
+        for member, ign, amount in donated_members:
+
+            line = (
+                f"✅ **{ign}** — "
+                f"{amount:,}\n"
+            )
+
+            if len(donated_text) + len(line) > 1000:
+                break
+
+            donated_text += line
 
         embed.add_field(
-            name="Donated Today",
-            value=yes,
+            name="✅ Donated Today",
+            value=donated_text,
+            inline=False
+        )
+
+    else:
+
+        embed.add_field(
+            name="✅ Donated Today",
+            value="Nobody has been matched yet.",
             inline=False
         )
 
 
-    if no:
+    # =========================
+    # MISSING LIST
+    # =========================
+
+    if missing_members:
+
+        missing_text = ""
+
+        for member in missing_members:
+
+            line = (
+                f"❌ {member.mention} "
+                f"({member.display_name})\n"
+            )
+
+            if len(missing_text) + len(line) > 1000:
+                missing_text += "\n*More members not shown...*"
+                break
+
+            missing_text += line
 
         embed.add_field(
-            name="Not Donated",
-            value=no,
+            name="❌ Not Donated Today",
+            value=missing_text,
+            inline=False
+        )
+
+    else:
+
+        embed.add_field(
+            name="❌ Not Donated Today",
+            value="🎉 Everyone has donated!",
             inline=False
         )
 
 
-    if not yes and not no:
+    # =========================
+    # UNMATCHED IGNS
+    # =========================
 
-        embed.description = (
-            "No members found."
+    if unmatched_donations:
+
+        unmatched_text = ""
+
+        for ign, amount in unmatched_donations:
+
+            line = (
+                f"⚠️ **{ign}** — "
+                f"{amount:,}\n"
+            )
+
+            if len(unmatched_text) + len(line) > 1000:
+                break
+
+            unmatched_text += line
+
+        embed.add_field(
+            name="⚠️ IGN Not Matched to Discord",
+            value=(
+                unmatched_text +
+                "\nThese players donated, but their IGN "
+                "doesn't match a Discord nickname/username."
+            ),
+            inline=False
         )
 
 
-    await interaction.response.send_message(
+    embed.set_footer(
+        text="Times are based on Brisbane time"
+    )
+
+
+    await interaction.followup.send(
         embed=embed
     )
 
 
-
 # =========================
-# LEADERBOARD
+# LEADERBOARD COMMAND
 # =========================
-
 
 @bot.tree.command(
     name="leaderboard",
-    description="Show donation leaderboard"
+    description="Show the guild donation leaderboard"
 )
 @app_commands.describe(
-    guild="Guild name"
+    guild="Choose a guild"
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
 )
 async def leaderboard(
     interaction: discord.Interaction,
-    guild: str
+    guild: app_commands.Choice[str]
 ):
 
     data = get_leaderboard(
-        guild
+        guild.value
     )
 
 
     embed = discord.Embed(
-        title=f"🏆 {guild} Leaderboard",
+        title=f"🏆 {guild.value} Donation Leaderboard",
         color=discord.Color.gold()
     )
 
 
-    text = ""
+    if not data:
 
-
-    for index, row in enumerate(data, 1):
-
-        text += (
-            f"**{index}. {row[0]}** "
-            f"- {row[1]:,}\n"
+        embed.description = (
+            "No donations recorded yet."
         )
-
-
-    if text:
-
-        embed.description = text
 
     else:
 
-        embed.description = (
-            "No donations recorded."
-        )
+        text = ""
+
+        medals = [
+            "🥇",
+            "🥈",
+            "🥉"
+        ]
+
+
+        for index, row in enumerate(
+            data,
+            start=1
+        ):
+
+            ign = row[0]
+            amount = row[1]
+
+            if index <= 3:
+                rank = medals[index - 1]
+            else:
+                rank = f"**#{index}**"
+
+            text += (
+                f"{rank} **{ign}** — "
+                f"{amount:,}\n"
+            )
+
+
+        embed.description = text
 
 
     await interaction.response.send_message(
         embed=embed
     )
-    # =========================
+
+
+# =========================
 # AUTOMATIC DONATION READER
 # =========================
-
 
 @bot.event
 async def on_message(message):
 
-    await bot.process_commands(message)
+    await bot.process_commands(
+        message
+    )
 
 
-    # ignore bots
+    # Ignore bot messages
     if message.author.bot:
         return
 
 
-    # only watch donation channels
+    # Only monitor the 9 guild log channels
     if message.channel.id not in GUILD_CHANNELS:
         return
 
@@ -523,53 +709,60 @@ async def on_message(message):
     text = message.content
 
 
-    # FIND DATA
+    # =========================
+    # READ DONATION FORMAT
+    # =========================
 
-    ign = re.search(
+    ign_match = re.search(
         r"IGN:\s*(.+)",
-        text
+        text,
+        re.IGNORECASE
     )
 
-    previous = re.search(
+    previous_match = re.search(
         r"Previous Guild Gold:\s*(.+)",
-        text
+        text,
+        re.IGNORECASE
     )
 
-    current = re.search(
+    current_match = re.search(
         r"Current Guild Gold:\s*(.+)",
-        text
+        text,
+        re.IGNORECASE
     )
 
-    donation = re.search(
+    donation_match = re.search(
         r"Daily Donation:\s*(.+)",
-        text
+        text,
+        re.IGNORECASE
     )
 
 
-    # ignore normal messages
-    if not ign or not donation:
+    # Not a valid donation log
+    if not ign_match or not donation_match:
         return
 
 
-
-    ign = ign.group(1).strip()
+    ign = ign_match.group(1).strip()
 
 
     previous = (
-        previous.group(1).strip()
-        if previous
+        previous_match.group(1).strip()
+        if previous_match
         else "Unknown"
     )
 
 
     current = (
-        current.group(1).strip()
-        if current
+        current_match.group(1).strip()
+        if current_match
         else "Unknown"
     )
 
 
-    donation_text = donation.group(1).strip()
+    donation_text = (
+        donation_match.group(1).strip()
+    )
 
 
     donation_amount = convert_amount(
@@ -577,17 +770,26 @@ async def on_message(message):
     )
 
 
+    if donation_amount <= 0:
+
+        print(
+            f"Invalid donation amount: {donation_text}"
+        )
+
+        return
+
+
     guild_name = GUILD_CHANNELS[
         message.channel.id
     ]
 
 
-    time = datetime.now().strftime(
-        "%d/%m/%Y %I:%M %p"
-    )
+    current_time = get_current_time()
 
 
-    # SAVE DATA
+    # =========================
+    # SAVE DONATION
+    # =========================
 
     save_donation(
         guild_name,
@@ -596,84 +798,130 @@ async def on_message(message):
         current,
         donation_amount,
         message.author.display_name,
-        time
+        current_time
     )
 
 
+    print(
+        f"Donation logged: "
+        f"{guild_name} | "
+        f"{ign} | "
+        f"{donation_amount}"
+    )
 
-    # SEND TO TRACKER CHANNEL
+
+    # =========================
+    # TRACKER CHANNEL
+    # =========================
 
     tracker = bot.get_channel(
         TRACKER_CHANNEL_ID
     )
 
 
-    if tracker:
+    if tracker is None:
+
+        try:
+
+            tracker = await bot.fetch_channel(
+                TRACKER_CHANNEL_ID
+            )
+
+        except Exception as e:
+
+            print(
+                f"Could not find tracker channel: {e}"
+            )
+
+            return
 
 
-        embed = discord.Embed(
-            title="💰 Guild Donation Logged",
-            color=discord.Color.green()
-        )
+    # =========================
+    # TRACKER EMBED
+    # =========================
+
+    embed = discord.Embed(
+        title="💰 Guild Donation Logged",
+        color=discord.Color.green()
+    )
 
 
-        embed.add_field(
-            name="Guild",
-            value=guild_name,
-            inline=False
-        )
+    embed.add_field(
+        name="Guild",
+        value=guild_name,
+        inline=False
+    )
 
 
-        embed.add_field(
-            name="IGN",
-            value=ign,
-            inline=False
-        )
+    embed.add_field(
+        name="IGN",
+        value=ign,
+        inline=False
+    )
 
 
-        embed.add_field(
-            name="Previous Gold",
-            value=previous
-        )
+    embed.add_field(
+        name="Previous Gold",
+        value=previous,
+        inline=True
+    )
 
 
-        embed.add_field(
-            name="Current Gold",
-            value=current
-        )
+    embed.add_field(
+        name="Current Gold",
+        value=current,
+        inline=True
+    )
 
 
-        embed.add_field(
-            name="Daily Donation",
-            value=f"{donation_text} ({donation_amount:,})",
-            inline=False
-        )
+    embed.add_field(
+        name="Daily Donation",
+        value=(
+            f"**{donation_text}** "
+            f"({donation_amount:,})"
+        ),
+        inline=False
+    )
 
 
-        embed.add_field(
-            name="Logged By",
-            value=message.author.mention
-        )
+    embed.add_field(
+        name="Logged By",
+        value=message.author.mention,
+        inline=False
+    )
 
 
-        embed.set_footer(
-            text=time
-        )
+    embed.add_field(
+        name="Original Log",
+        value=message.jump_url,
+        inline=False
+    )
 
 
-        await tracker.send(
-            embed=embed
-        )
+    embed.set_footer(
+        text=current_time
+    )
 
+
+    await tracker.send(
+        embed=embed
+    )
 
 
 # =========================
 # START BOT
 # =========================
 
-
 try:
-    bot.run(TOKEN)
+
+    bot.run(
+        TOKEN
+    )
+
 except Exception as e:
-    print("BOT CRASHED:")
+
+    print(
+        "BOT CRASHED:"
+    )
+
     print(e)
