@@ -276,6 +276,77 @@ def normalize_name(name):
     return re.sub(r"[^a-zA-Z0-9]", "", name).lower()
 
 
+def get_member_names(member):
+
+    names = set()
+
+    if member.name:
+        names.add(
+            normalize_name(
+                member.name
+            )
+        )
+
+    if member.display_name:
+        names.add(
+            normalize_name(
+                member.display_name
+            )
+        )
+
+    if member.global_name:
+        names.add(
+            normalize_name(
+                member.global_name
+            )
+        )
+
+    return {
+        name
+        for name in names
+        if name
+    }
+
+
+def names_match(
+    ign,
+    member
+):
+
+    ign_key = normalize_name(
+        ign
+    )
+
+    if not ign_key:
+        return False
+
+    member_names = get_member_names(
+        member
+    )
+
+    if ign_key in member_names:
+        return True
+
+    if len(ign_key) >= 4:
+
+        for discord_name in member_names:
+
+            if discord_name.startswith(
+                ign_key
+            ):
+                return True
+
+            if (
+                len(discord_name) >= 4
+                and ign_key.startswith(
+                    discord_name
+                )
+            ):
+                return True
+
+    return False
+
+
 def format_amount(amount):
     if amount >= 1_000_000_000:
         return f"{amount / 1_000_000_000:g}B"
