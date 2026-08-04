@@ -1550,8 +1550,17 @@ class DonationBot(commands.Bot):
             id=SERVER_ID
         )
 
-        # Copy current commands to this server and sync.
-        # Guild-specific commands update much faster than global.
+        # Force-refresh the server command list.
+        # This removes stale cached slash commands first,
+        # then installs every command currently in this file.
+        self.tree.clear_commands(
+            guild=guild_obj
+        )
+
+        await self.tree.sync(
+            guild=guild_obj
+        )
+
         self.tree.copy_global_to(
             guild=guild_obj
         )
@@ -1563,6 +1572,10 @@ class DonationBot(commands.Bot):
         print(
             f"Synced {len(synced)} commands "
             f"to server {SERVER_ID}"
+        )
+
+        print(
+            "Slash commands force-refreshed."
         )
 
         automation_loop.start()
@@ -3146,6 +3159,119 @@ async def robloxroster(
             body,
             discord.Colour.blurple(),
         )
+    )
+
+
+
+# =========================================================
+# /CLEANJUNKLOGS
+# Removes malformed old imported rows such as field labels
+# accidentally saved as Roblox IGNs.
+# =========================================================
+
+@bot.tree.command(
+    name="cleanjunklogs",
+    description="Remove malformed old donation rows from the database"
+)
+async def cleanjunklogs(
+    interaction: discord.Interaction,
+):
+    if not can_manage_roblox(interaction.user):
+        await interaction.response.send_message(
+            "❌ This command is for **Leader**, **Co-Leader**, "
+            "or someone with **Manage Server**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    # These are field labels that should never be player IGNs.
+    bad_keys = {
+        "ign",
+        "previousguildgold",
+        "currentguildgold",
+        "dailydonation",
+    }
+
+    removed_donations = 0
+    removed_accounts = 0
+    removed_coverage = 0
+
+    # Remove malformed donation rows.
+    cursor.execute("""
+    SELECT id, ign
+    FROM donations
+    ORDER BY id ASC
+    """)
+
+    for donation_id, ign in cursor.fetchall():
+        if normalize_name(ign) in bad_keys:
+            cursor.execute(
+                "DELETE FROM credit_processed WHERE donation_id=?",
+                (donation_id,)
+            )
+            cursor.execute(
+                "DELETE FROM donations WHERE id=?",
+                (donation_id,)
+            )
+            removed_donations += 1
+
+    # Remove malformed credit accounts.
+    cursor.execute("""
+    SELECT guild, ign_key
+    FROM donation_credit
+    """)
+
+    for guild_name, ign_key in cursor.fetchall():
+        if normalize_name(ign_key) in bad_keys:
+            cursor.execute("""
+            DELETE FROM donation_credit
+            WHERE guild=? AND ign_key=?
+            """, (
+                guild_name,
+                ign_key,
+            ))
+            removed_accounts += 1
+
+    # Remove malformed coverage accounts.
+    cursor.execute("""
+    SELECT guild, ign_key, covered_day
+    FROM donation_coverage
+    """)
+
+    for guild_name, ign_key, covered_day in cursor.fetchall():
+        if normalize_name(ign_key) in bad_keys:
+            cursor.execute("""
+            DELETE FROM donation_coverage
+            WHERE guild=? AND ign_key=? AND covered_day=?
+            """, (
+                guild_name,
+                ign_key,
+                covered_day,
+            ))
+            removed_coverage += 1
+
+    db.commit()
+
+    body = (
+        f"### 🧹 Cleanup Complete\n"
+        f"**Donation rows removed:** {removed_donations}\n"
+        f"**Junk credit accounts removed:** {removed_accounts}\n"
+        f"**Junk coverage rows removed:** {removed_coverage}\n\n"
+        f"-# Normal player donation data was left alone."
+    )
+
+    await interaction.followup.send(
+        view=simple_info_view(
+            "🧹 Junk Logs Cleaned",
+            body,
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
     )
 
 
