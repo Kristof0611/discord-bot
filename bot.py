@@ -27,6 +27,10 @@ PH_TZ = ZoneInfo("Asia/Manila")
 
 DEFAULT_DAILY_REQUIREMENT = 100_000
 
+# Roblox roster managers
+LEADER_ROLE_ID = 1530461465209995447
+CO_LEADER_ROLE_ID = 1531132914190778388
+
 # Automatic reminder/report defaults (Philippines time)
 DEFAULT_REMINDER_HOUR = 20       # 8:00 PM PH
 DEFAULT_REMINDER_MINUTE = 0
@@ -156,6 +160,20 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS automation_runs (
     run_key TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS roblox_members (
+    guild TEXT NOT NULL,
+    discord_user_id TEXT NOT NULL,
+    roblox_ign_key TEXT NOT NULL,
+    roblox_ign TEXT NOT NULL,
+    roblox_username TEXT NOT NULL,
+    added_by_id TEXT,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (guild, discord_user_id),
+    UNIQUE (guild, roblox_ign_key)
 )
 """)
 
@@ -361,6 +379,171 @@ def names_match(ign, member):
                 return True
 
     return False
+
+
+
+# =========================================================
+# ROBLOX MEMBER HELPERS
+# =========================================================
+
+def can_manage_roblox(member):
+    """
+    Leader, Co-Leader, or Manage Server can add/edit/remove
+    another person's Roblox information.
+    """
+    if member.guild_permissions.manage_guild:
+        return True
+
+    role_ids = {role.id for role in member.roles}
+
+    return (
+        LEADER_ROLE_ID in role_ids
+        or CO_LEADER_ROLE_ID in role_ids
+    )
+
+
+def upsert_roblox_member(
+    guild_name,
+    discord_user_id,
+    roblox_ign,
+    roblox_username,
+    added_by_id,
+):
+    ign_key = normalize_name(roblox_ign)
+
+    if not ign_key:
+        return False, "Invalid Roblox IGN."
+
+    if not roblox_username.strip():
+        return False, "Invalid Roblox username."
+
+    # One IGN cannot belong to two Discord users in the same guild.
+    cursor.execute("""
+    SELECT discord_user_id
+    FROM roblox_members
+    WHERE guild=? AND roblox_ign_key=?
+    """, (
+        guild_name,
+        ign_key,
+    ))
+
+    existing = cursor.fetchone()
+
+    if (
+        existing
+        and existing[0] != str(discord_user_id)
+    ):
+        return (
+            False,
+            "That Roblox IGN is already assigned to another "
+            "Discord member in this guild."
+        )
+
+    cursor.execute("""
+    INSERT INTO roblox_members
+    (
+        guild,
+        discord_user_id,
+        roblox_ign_key,
+        roblox_ign,
+        roblox_username,
+        added_by_id,
+        added_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+
+    ON CONFLICT(guild, discord_user_id)
+    DO UPDATE SET
+        roblox_ign_key=excluded.roblox_ign_key,
+        roblox_ign=excluded.roblox_ign,
+        roblox_username=excluded.roblox_username,
+        added_by_id=excluded.added_by_id,
+        added_at=excluded.added_at
+    """, (
+        guild_name,
+        str(discord_user_id),
+        ign_key,
+        roblox_ign.strip(),
+        roblox_username.strip(),
+        str(added_by_id),
+        utc_now().isoformat(),
+    ))
+
+    db.commit()
+    return True, None
+
+
+def remove_roblox_member(
+    guild_name,
+    discord_user_id,
+):
+    cursor.execute("""
+    DELETE FROM roblox_members
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    db.commit()
+
+
+def get_roblox_member_by_discord(
+    guild_name,
+    discord_user_id,
+):
+    cursor.execute("""
+    SELECT
+        roblox_ign_key,
+        roblox_ign,
+        roblox_username
+    FROM roblox_members
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    return cursor.fetchone()
+
+
+def get_roblox_member_by_ign(
+    guild_name,
+    roblox_ign,
+):
+    cursor.execute("""
+    SELECT
+        discord_user_id,
+        roblox_ign_key,
+        roblox_ign,
+        roblox_username
+    FROM roblox_members
+    WHERE guild=? AND roblox_ign_key=?
+    """, (
+        guild_name,
+        normalize_name(roblox_ign),
+    ))
+
+    return cursor.fetchone()
+
+
+def get_roblox_roster(
+    guild_name,
+):
+    cursor.execute("""
+    SELECT
+        discord_user_id,
+        roblox_ign,
+        roblox_username,
+        roblox_ign_key
+    FROM roblox_members
+    WHERE guild=?
+    ORDER BY LOWER(roblox_ign) ASC
+    """, (
+        guild_name,
+    ))
+
+    return cursor.fetchall()
 
 
 # =========================================================
@@ -850,6 +1033,15 @@ def calculate_member_status(
 
     accounts = get_accounts(guild_name)
 
+    account_lookup = {
+        ign_key: (
+            ign_key,
+            display_ign,
+            balance,
+        )
+        for ign_key, display_ign, balance in accounts
+    }
+
     covered_members = []
     missing_members = []
     matched_keys = set()
@@ -857,21 +1049,59 @@ def calculate_member_status(
     for member in members:
         matched = None
 
-        for ign_key, display_ign, balance in accounts:
-            if names_match(display_ign, member):
-                matched = (
-                    ign_key,
-                    display_ign,
-                    balance,
+        # -------------------------------------------------
+        # 1) Saved Discord / Roblox IGN / Roblox Username
+        #    mapping has priority.
+        # -------------------------------------------------
+        saved = get_roblox_member_by_discord(
+            guild_name,
+            member.id,
+        )
+
+        if saved:
+            saved_ign_key, saved_ign, saved_username = saved
+
+            matched = account_lookup.get(
+                saved_ign_key,
+                (
+                    saved_ign_key,
+                    saved_ign,
+                    0,
                 )
-                break
+            )
+
+        # -------------------------------------------------
+        # 2) Fall back to safe automatic name matching.
+        # -------------------------------------------------
+        if matched is None:
+            for (
+                ign_key,
+                display_ign,
+                balance
+            ) in accounts:
+
+                if names_match(
+                    display_ign,
+                    member
+                ):
+                    matched = (
+                        ign_key,
+                        display_ign,
+                        balance,
+                    )
+                    break
 
         if matched is None:
-            missing_members.append(member)
+            missing_members.append(
+                member
+            )
             continue
 
         ign_key, display_ign, balance = matched
-        matched_keys.add(ign_key)
+
+        matched_keys.add(
+            ign_key
+        )
 
         if is_day_covered(
             guild_name,
@@ -893,17 +1123,40 @@ def calculate_member_status(
                 )
             )
         else:
-            missing_members.append(member)
+            missing_members.append(
+                member
+            )
 
+    # -----------------------------------------------------
+    # Donation IGNs that do not have a Discord mapping.
+    # -----------------------------------------------------
     unlinked = []
 
-    for ign_key, display_ign, balance in accounts:
+    for (
+        ign_key,
+        display_ign,
+        balance
+    ) in accounts:
+
         if ign_key in matched_keys:
             continue
 
-        # Final safety check
+        # If this IGN exists in the saved Roblox roster,
+        # it is linked even when the user does not currently
+        # have the guild Discord role.
+        roster_match = get_roblox_member_by_ign(
+            guild_name,
+            display_ign,
+        )
+
+        if roster_match:
+            continue
+
         if any(
-            names_match(display_ign, member)
+            names_match(
+                display_ign,
+                member
+            )
             for member in members
         ):
             continue
@@ -933,7 +1186,11 @@ def calculate_member_status(
             )
         )
 
-    return covered_members, missing_members, unlinked
+    return (
+        covered_members,
+        missing_members,
+        unlinked,
+    )
 
 
 # =========================================================
@@ -2498,6 +2755,397 @@ async def syncoldlogs(
             ),
         ),
         ephemeral=True,
+    )
+
+
+
+# =========================================================
+# ROBLOX MEMBER COMMANDS
+# Format: Discord User / Roblox IGN / Roblox Username
+# =========================================================
+
+@bot.tree.command(
+    name="linkroblox",
+    description="Save Discord User / Roblox IGN / Roblox Username"
+)
+@app_commands.describe(
+    guild="Choose a guild",
+    roblox_ign="The IGN used in donation logs",
+    roblox_username="The actual Roblox account username",
+    member=(
+        "Leave blank to link yourself. "
+        "Leader/Co-Leader/Admin can choose another member."
+    ),
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def linkroblox(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+    roblox_ign: str,
+    roblox_username: str,
+    member: discord.Member | None = None,
+):
+    guild_name = guild.value
+
+    target = (
+        member
+        if member is not None
+        else interaction.user
+    )
+
+    # Anyone may add/update themselves.
+    # Another member requires Leader, Co-Leader or Manage Server.
+    if (
+        target.id != interaction.user.id
+        and not can_manage_roblox(
+            interaction.user
+        )
+    ):
+        await interaction.response.send_message(
+            "❌ Only **Leader**, **Co-Leader**, or "
+            "**Manage Server** can edit another member.",
+            ephemeral=True,
+        )
+        return
+
+    success, error = upsert_roblox_member(
+        guild_name,
+        target.id,
+        roblox_ign,
+        roblox_username,
+        interaction.user.id,
+    )
+
+    if not success:
+        await interaction.response.send_message(
+            f"❌ {error}",
+            ephemeral=True,
+        )
+        return
+
+    body = (
+        f"### 👤 Discord User\n"
+        f"{target.mention}\n"
+        f"### 🎮 Roblox IGN\n"
+        f"**{roblox_ign}**\n"
+        f"### 🔎 Roblox Username\n"
+        f"**{roblox_username}**\n"
+        f"### 🛡️ Guild\n"
+        f"**{guild_name}**\n\n"
+        f"✅ Donation logs will match using the **Roblox IGN**."
+    )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "🔗 Roblox Member Saved",
+            body,
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="myroblox",
+    description="Check your saved Roblox IGN and Roblox username"
+)
+@app_commands.describe(
+    guild="Choose a guild"
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def myroblox(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+):
+    saved = get_roblox_member_by_discord(
+        guild.value,
+        interaction.user.id,
+    )
+
+    if not saved:
+        await interaction.response.send_message(
+            view=simple_info_view(
+                "🎮 My Roblox Information",
+                (
+                    f"No Roblox information is saved for "
+                    f"**{guild.value}**.\n\n"
+                    f"Use `/linkroblox`."
+                ),
+                discord.Colour.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    ign_key, roblox_ign, roblox_username = saved
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "🎮 My Roblox Information",
+            (
+                f"### 🛡️ Guild\n**{guild.value}**\n"
+                f"### 🎮 Roblox IGN\n**{roblox_ign}**\n"
+                f"### 🔎 Roblox Username\n**{roblox_username}**"
+            ),
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="unlinkroblox",
+    description="Remove saved Roblox information"
+)
+@app_commands.describe(
+    guild="Choose a guild",
+    member=(
+        "Leave blank to remove yourself. "
+        "Leader/Co-Leader/Admin can choose another member."
+    ),
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def unlinkroblox(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+    member: discord.Member | None = None,
+):
+    target = (
+        member
+        if member is not None
+        else interaction.user
+    )
+
+    if (
+        target.id != interaction.user.id
+        and not can_manage_roblox(
+            interaction.user
+        )
+    ):
+        await interaction.response.send_message(
+            "❌ Only **Leader**, **Co-Leader**, or "
+            "**Manage Server** can remove another member.",
+            ephemeral=True,
+        )
+        return
+
+    saved = get_roblox_member_by_discord(
+        guild.value,
+        target.id,
+    )
+
+    if not saved:
+        await interaction.response.send_message(
+            "❌ No Roblox information is saved for that member.",
+            ephemeral=True,
+        )
+        return
+
+    remove_roblox_member(
+        guild.value,
+        target.id,
+    )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "🔓 Roblox Information Removed",
+            (
+                f"Removed the Roblox mapping for "
+                f"{target.mention} in **{guild.value}**.\n\n"
+                f"-# Existing donation history was not deleted."
+            ),
+            discord.Colour.orange(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="addroblox",
+    description="Leader/Co-Leader: add a guild member's Roblox details"
+)
+@app_commands.describe(
+    guild="Choose a guild",
+    member="Discord user",
+    roblox_ign="IGN used in donation logs",
+    roblox_username="Actual Roblox account username",
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def addroblox(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+    member: discord.Member,
+    roblox_ign: str,
+    roblox_username: str,
+):
+    if not can_manage_roblox(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "❌ This command is for **Leader**, **Co-Leader**, "
+            "or **Manage Server**.",
+            ephemeral=True,
+        )
+        return
+
+    success, error = upsert_roblox_member(
+        guild.value,
+        member.id,
+        roblox_ign,
+        roblox_username,
+        interaction.user.id,
+    )
+
+    if not success:
+        await interaction.response.send_message(
+            f"❌ {error}",
+            ephemeral=True,
+        )
+        return
+
+    body = (
+        f"### 👤 Discord User\n"
+        f"{member.mention}\n"
+        f"### 🎮 Roblox IGN\n"
+        f"**{roblox_ign}**\n"
+        f"### 🔎 Roblox Username\n"
+        f"**{roblox_username}**\n"
+        f"### 🛡️ Guild\n"
+        f"**{guild.value}**\n\n"
+        f"✅ The bot will use **{roblox_ign}** to match "
+        f"their donation logs."
+    )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "➕ Roblox Member Added",
+            body,
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="removeroblox",
+    description="Leader/Co-Leader: remove a guild member's Roblox mapping"
+)
+@app_commands.describe(
+    guild="Choose a guild",
+    member="Discord user",
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def removeroblox(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+    member: discord.Member,
+):
+    if not can_manage_roblox(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "❌ This command is for **Leader**, **Co-Leader**, "
+            "or **Manage Server**.",
+            ephemeral=True,
+        )
+        return
+
+    saved = get_roblox_member_by_discord(
+        guild.value,
+        member.id,
+    )
+
+    if not saved:
+        await interaction.response.send_message(
+            "❌ That member is not in the saved Roblox roster.",
+            ephemeral=True,
+        )
+        return
+
+    remove_roblox_member(
+        guild.value,
+        member.id,
+    )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "➖ Roblox Member Removed",
+            (
+                f"Removed {member.mention} from "
+                f"**{guild.value}**'s saved Roblox roster.\n\n"
+                f"-# Donation history was not deleted."
+            ),
+            discord.Colour.red(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="robloxroster",
+    description="Show Discord User / Roblox IGN / Roblox Username"
+)
+@app_commands.describe(
+    guild="Choose a guild"
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def robloxroster(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+):
+    roster = get_roblox_roster(
+        guild.value
+    )
+
+    if not roster:
+        body = (
+            "No Roblox members have been saved "
+            "for this guild yet."
+        )
+    else:
+        lines = []
+
+        for (
+            discord_user_id,
+            roblox_ign,
+            roblox_username,
+            ign_key,
+        ) in roster[:60]:
+
+            lines.append(
+                f"👤 <@{discord_user_id}>\n"
+                f"└ 🎮 IGN: **{roblox_ign}**\n"
+                f"└ 🔎 User: **{roblox_username}**"
+            )
+
+        if len(roster) > 60:
+            lines.append(
+                f"-# +{len(roster) - 60} more members"
+            )
+
+        body = (
+            f"**{len(roster)} saved member(s)**\n\n"
+            + "\n\n".join(lines)
+        )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            f"🎮 {guild.value} Roblox Roster",
+            body,
+            discord.Colour.blurple(),
+        )
     )
 
 
