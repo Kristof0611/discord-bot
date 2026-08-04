@@ -371,44 +371,150 @@ def convert_amount(value):
         return 0
 
 
+def normalize_message_text(value):
+    """
+    Normalize Discord text before parsing:
+    - zero-width characters
+    - non-breaking / Unicode spaces
+    - code fences/backticks
+    - repeated whitespace
+    """
+    if value is None:
+        return ""
+
+    value = str(value)
+
+    # Remove common zero-width/invisible characters.
+    value = re.sub(
+        r"[\u200B-\u200D\u2060\uFEFF]",
+        "",
+        value
+    )
+
+    # Normalize Unicode spaces to normal spaces.
+    value = value.replace("\u00A0", " ")
+    value = value.replace("\u202F", " ")
+    value = value.replace("\u2007", " ")
+
+    # Remove Markdown code fences/backticks but keep text.
+    value = value.replace("```", "")
+    value = value.replace("`", "")
+
+    # Normalize line endings.
+    value = value.replace("\r\n", "\n")
+    value = value.replace("\r", "\n")
+
+    # Collapse horizontal whitespace while preserving lines.
+    lines = []
+
+    for line in value.split("\n"):
+        line = re.sub(
+            r"[ \t]+",
+            " ",
+            line
+        ).strip()
+
+        if line:
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
 def get_message_donation_text(message):
     """
-    Combine all readable Discord message text into one parser input:
-    - normal message content
+    Combine every useful Discord text source into one normalized
+    parser input:
+    - message.content
+    - message.system_content
     - embed title
     - embed description
-    - embed author name
-    - embed field names + values
-    - embed footer text
+    - embed author
+    - embed fields
+    - embed footer
+
+    This helps with webhook/embed/code-block donation formats.
     """
     parts = []
 
-    if getattr(message, "content", None):
-        parts.append(message.content)
+    content = getattr(
+        message,
+        "content",
+        None
+    )
 
-    for embed in getattr(message, "embeds", []) or []:
+    if content:
+        parts.append(
+            content
+        )
+
+    system_content = getattr(
+        message,
+        "system_content",
+        None
+    )
+
+    if system_content and system_content != content:
+        parts.append(
+            system_content
+        )
+
+    for embed in (
+        getattr(
+            message,
+            "embeds",
+            []
+        )
+        or []
+    ):
+
         if embed.title:
-            parts.append(str(embed.title))
+            parts.append(
+                str(embed.title)
+            )
 
         if embed.description:
-            parts.append(str(embed.description))
+            parts.append(
+                str(embed.description)
+            )
 
-        if embed.author and embed.author.name:
-            parts.append(str(embed.author.name))
+        if (
+            embed.author
+            and embed.author.name
+        ):
+            parts.append(
+                str(
+                    embed.author.name
+                )
+            )
 
         for field in embed.fields:
+
             if field.name:
-                parts.append(str(field.name))
+                parts.append(
+                    str(field.name)
+                )
+
             if field.value:
-                parts.append(str(field.value))
+                parts.append(
+                    str(field.value)
+                )
 
-        if embed.footer and embed.footer.text:
-            parts.append(str(embed.footer.text))
+        if (
+            embed.footer
+            and embed.footer.text
+        ):
+            parts.append(
+                str(
+                    embed.footer.text
+                )
+            )
 
-    return "\\n".join(
-        part.strip()
-        for part in parts
-        if part and str(part).strip()
+    return normalize_message_text(
+        "\n".join(
+            str(part)
+            for part in parts
+            if part is not None
+        )
     )
 
 
@@ -797,6 +903,171 @@ def parse_donation_message(text):
                 ):
                     ign = candidate
                     break
+
+    # -----------------------------------------------------
+    # PASS 6: universal line heuristic
+    # -----------------------------------------------------
+    if donation_amount <= 0 or not ign:
+        lines = [
+            line.strip()
+            for line in normalize_message_text(
+                text
+            ).splitlines()
+            if line.strip()
+        ]
+
+        # Find numeric lines and classify them by nearby words.
+        for line in lines:
+            lower = line.lower()
+            amount = _extract_amount_from_text(
+                line
+            )
+
+            if amount <= 0:
+                continue
+
+            if (
+                donation_amount <= 0
+                and any(
+                    key in lower
+                    for key in (
+                        "donat",
+                        "gave",
+                        "given",
+                        "contribution",
+                        "added",
+                        "plus",
+                    )
+                )
+            ):
+                donation_amount = amount
+                donation_text = format_amount(
+                    amount
+                )
+                continue
+
+            if (
+                previous_amount <= 0
+                and any(
+                    key in lower
+                    for key in (
+                        "previous",
+                        "prev",
+                        "before",
+                        "old gold",
+                    )
+                )
+            ):
+                previous_amount = amount
+                previous = format_amount(
+                    amount
+                )
+                continue
+
+            if (
+                current_amount <= 0
+                and any(
+                    key in lower
+                    for key in (
+                        "current",
+                        "curr",
+                        "after",
+                        "new gold",
+                    )
+                )
+            ):
+                current_amount = amount
+                current = format_amount(
+                    amount
+                )
+                continue
+
+        # If donation is still missing, use the positive gold delta.
+        if (
+            donation_amount <= 0
+            and previous_amount > 0
+            and current_amount > previous_amount
+        ):
+            donation_amount = (
+                current_amount
+                - previous_amount
+            )
+
+            donation_text = format_amount(
+                donation_amount
+            )
+
+        # IGN fallback: take text after IGN label with any punctuation.
+        if not ign:
+            ign_any = re.search(
+                r"(?:^|\n)\s*(?:player\s*)?"
+                r"(?:roblox\s*)?(?:ign|in[\s-]*game\s*name)"
+                r"\s*[^A-Za-z0-9_]*"
+                r"([A-Za-z0-9_ .\-]{2,32})"
+                r"(?:\n|$)",
+                normalize_message_text(
+                    text
+                ),
+                re.IGNORECASE
+            )
+
+            if ign_any:
+                candidate = ign_any.group(
+                    1
+                ).strip()
+
+                if normalize_name(
+                    candidate
+                ) not in {
+                    "ign",
+                    "previousguildgold",
+                    "currentguildgold",
+                    "dailydonation",
+                    "golddonated",
+                    "donation",
+                    "donated",
+                }:
+                    ign = candidate
+
+        # Final name-like line fallback for donation-shaped messages.
+        if (
+            not ign
+            and donation_amount > 0
+        ):
+            for line in lines:
+                lower = line.lower()
+
+                if any(
+                    word in lower
+                    for word in (
+                        "gold",
+                        "donat",
+                        "previous",
+                        "current",
+                        "before",
+                        "after",
+                        "amount",
+                    )
+                ):
+                    continue
+
+                candidate = re.sub(
+                    r"^[^A-Za-z0-9_]+|[^A-Za-z0-9_ .\-]+$",
+                    "",
+                    line
+                ).strip()
+
+                if re.fullmatch(
+                    r"[A-Za-z0-9_ .\-]{2,32}",
+                    candidate
+                ):
+                    if not re.fullmatch(
+                        r"[\d,.]+[KMB]?",
+                        candidate,
+                        re.IGNORECASE
+                    ):
+                        ign = candidate
+                        break
 
     # -----------------------------------------------------
     # FINAL VALIDATION
@@ -4049,10 +4320,21 @@ async def rescanmessage(
     )
 
     if parsed is None:
+        extracted = get_message_donation_text(
+            target_message
+        )
+
+        preview = extracted[:1200]
+
+        if not preview:
+            preview = "(No readable message/embed text found.)"
+
         details = (
-            "The message was found, but the flexible parser "
-            "still couldn't safely identify both an IGN and "
-            "a donation amount."
+            "The message was found, but the parser still "
+            "couldn't safely identify both an IGN and a "
+            "donation amount.\n\n"
+            "**What the bot actually read:**\n"
+            f"```{preview}```"
         )
     else:
         details = (
