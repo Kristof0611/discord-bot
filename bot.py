@@ -2770,3 +2770,4 @@ try:
     bot.run(TOKEN)
 except Exception as exc:
     print("BOT CRASHED:")
+    print(repr(exc))
