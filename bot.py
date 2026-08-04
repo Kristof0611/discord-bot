@@ -371,6 +371,47 @@ def convert_amount(value):
         return 0
 
 
+def get_message_donation_text(message):
+    """
+    Combine all readable Discord message text into one parser input:
+    - normal message content
+    - embed title
+    - embed description
+    - embed author name
+    - embed field names + values
+    - embed footer text
+    """
+    parts = []
+
+    if getattr(message, "content", None):
+        parts.append(message.content)
+
+    for embed in getattr(message, "embeds", []) or []:
+        if embed.title:
+            parts.append(str(embed.title))
+
+        if embed.description:
+            parts.append(str(embed.description))
+
+        if embed.author and embed.author.name:
+            parts.append(str(embed.author.name))
+
+        for field in embed.fields:
+            if field.name:
+                parts.append(str(field.name))
+            if field.value:
+                parts.append(str(field.value))
+
+        if embed.footer and embed.footer.text:
+            parts.append(str(embed.footer.text))
+
+    return "\\n".join(
+        part.strip()
+        for part in parts
+        if part and str(part).strip()
+    )
+
+
 def _extract_amount_from_text(value):
     """
     Finds amounts such as:
@@ -493,8 +534,8 @@ def parse_donation_message(text):
 
         # IGN variations
         ign_match = re.match(
-            r"^(?:player\s*)?(?:ign|in[\s-]*game\s*name)"
-            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            r"^(?:player\s*)?(?:ign|in[\s-]*game\s*name|roblox\s*ign|player)"
+            r"\s*(?:[:=\-|>]\s*|\s+)(.+?)$",
             clean,
             re.IGNORECASE
         )
@@ -517,9 +558,9 @@ def parse_donation_message(text):
 
         # Previous gold variations
         previous_match = re.match(
-            r"^(?:previous|prev|before)"
-            r"(?:\s+guild)?\s+gold"
-            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            r"^(?:previous|prev|before|old)"
+            r"(?:\s+guild)?\s*(?:gold|amount)?"
+            r"\s*(?:[:=\-|>]\s*|\s+)(.+?)$",
             clean,
             re.IGNORECASE
         )
@@ -533,9 +574,9 @@ def parse_donation_message(text):
 
         # Current gold variations
         current_match = re.match(
-            r"^(?:current|curr|after)"
-            r"(?:\s+guild)?\s+gold"
-            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            r"^(?:current|curr|after|new)"
+            r"(?:\s+guild)?\s*(?:gold|amount)?"
+            r"\s*(?:[:=\-|>]\s*|\s+)(.+?)$",
             clean,
             re.IGNORECASE
         )
@@ -550,8 +591,8 @@ def parse_donation_message(text):
         # Donation variations
         donation_match = re.match(
             r"^(?:daily\s+donation|gold\s+donated|gold\s+donation|"
-            r"donation|donated|donate)"
-            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            r"donation|donated|donate|gave|given|contribution)"
+            r"\s*(?:[:=\-|>+]\s*|\s+)(.+?)$",
             clean,
             re.IGNORECASE
         )
@@ -696,6 +737,66 @@ def parse_donation_message(text):
             ):
                 ign = candidate
                 break
+
+    # -----------------------------------------------------
+    # PASS 5: compact / one-line formats
+    # Example:
+    # HADLANG | 24.9M > 25M | +100K
+    # -----------------------------------------------------
+    if donation_amount <= 0:
+        plus_amount = re.search(
+            r"\+\s*(\d[\d,]*(?:\.\d+)?\s*[KMB]?)",
+            text,
+            re.IGNORECASE
+        )
+
+        if plus_amount:
+            donation_text = plus_amount.group(1)
+            donation_amount = convert_amount(
+                donation_text
+            )
+
+    if not ign and donation_amount > 0:
+        # Prefer the first name-like token/segment that is not a field label.
+        segments = re.split(
+            r"[|\\n]",
+            text
+        )
+
+        for segment in segments:
+            candidate = segment.strip(" `*_-:>+")
+
+            if not candidate:
+                continue
+
+            lower = candidate.lower()
+
+            if any(
+                word in lower
+                for word in (
+                    "gold",
+                    "donat",
+                    "previous",
+                    "current",
+                    "before",
+                    "after",
+                    "amount",
+                )
+            ):
+                continue
+
+            if re.fullmatch(
+                r"[A-Za-z0-9_ .\\-]{2,32}",
+                candidate
+            ):
+                # Don't use a pure number as an IGN.
+                if not re.fullmatch(
+                    r"[\d,.]+[KMB]?",
+                    candidate,
+                    re.IGNORECASE
+                ):
+                    ign = candidate
+                    break
 
     # -----------------------------------------------------
     # FINAL VALIDATION
@@ -2045,8 +2146,12 @@ async def process_donation_message(
     if message.channel.id not in GUILD_CHANNELS:
         return "invalid"
 
+    donation_source_text = get_message_donation_text(
+        message
+    )
+
     parsed = parse_donation_message(
-        message.content
+        donation_source_text
     )
 
     if not parsed:
@@ -2178,7 +2283,9 @@ async def on_message(message):
         elif (
             result == "invalid"
             and looks_like_donation_message(
-                message.content
+                get_message_donation_text(
+                    message
+                )
             )
         ):
             try:
@@ -3936,7 +4043,9 @@ async def rescanmessage(
         return
 
     parsed = parse_donation_message(
-        target_message.content
+        get_message_donation_text(
+            target_message
+        )
     )
 
     if parsed is None:
