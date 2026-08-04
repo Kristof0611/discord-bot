@@ -300,86 +300,363 @@ def convert_amount(value):
         return 0
 
 
-def parse_donation_message(text):
-    ign_match = re.search(
-        r"IGN\s*:\s*(.+)",
-        text,
+def _extract_amount_from_text(value):
+    """
+    Finds amounts such as:
+    100K
+    100,000
+    24.9M
+    1.2B
+    """
+    if not value:
+        return 0
+
+    match = re.search(
+        r"(\d[\d,]*(?:\.\d+)?\s*[KMB]?)",
+        value,
         re.IGNORECASE
     )
-    previous_match = re.search(
-        r"Previous\s+Guild\s+Gold\s*:\s*(.+)",
-        text,
-        re.IGNORECASE
+
+    if not match:
+        return 0
+
+    return convert_amount(
+        match.group(1)
     )
-    current_match = re.search(
-        r"Current\s+Guild\s+Gold\s*:\s*(.+)",
-        text,
-        re.IGNORECASE
-    )
-    donation_match = re.search(
-        r"Daily\s+Donation\s*:\s*(.+)",
+
+
+def looks_like_donation_message(text):
+    """
+    Used only for live warnings.
+    Normal chat should not trigger a warning.
+    """
+    lowered = text.lower()
+
+    signals = 0
+
+    for keyword in (
+        "ign",
+        "guild gold",
+        "previous",
+        "prev",
+        "current",
+        "daily donation",
+        "donation",
+        "donated",
+        "gold donated",
+        "gold donation",
+    ):
+        if keyword in lowered:
+            signals += 1
+
+    amount_hits = re.findall(
+        r"\d[\d,]*(?:\.\d+)?\s*[KMB]?",
         text,
         re.IGNORECASE
     )
 
-    if not ign_match or not donation_match:
+    # Require multiple donation-like clues.
+    return (
+        signals >= 2
+        or (
+            signals >= 1
+            and len(amount_hits) >= 2
+        )
+    )
+
+
+def parse_donation_message(text):
+    """
+    Flexible donation parser.
+
+    It accepts the normal format and small mistakes such as:
+      IGN: Player
+      IGN - Player
+      IGN Player
+      Player IGN: Player
+
+      Previous Guild Gold: 24.9M
+      Prev Gold - 24.9M
+      Before Gold: 24.9M
+
+      Current Guild Gold: 25.0M
+      Current Gold - 25.0M
+      After Gold: 25.0M
+
+      Daily Donation: 100K
+      Gold donated: 100,000
+      Donation - 100K
+      Donated 100K
+
+    If the donation line is missing but previous/current gold are
+    both available, the bot calculates:
+        current - previous
+
+    Previous/current gold are optional as long as IGN and donation
+    can still be identified.
+    """
+
+    raw_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not raw_lines:
         return None
 
-    ign = ign_match.group(1).strip()
-    previous = previous_match.group(1).strip() if previous_match else "Unknown"
-    current = current_match.group(1).strip() if current_match else "Unknown"
-    donation_text = donation_match.group(1).strip()
-    donation_amount = convert_amount(donation_text)
+    ign = None
+    previous = "Unknown"
+    current = "Unknown"
+    donation_text = None
+    donation_amount = 0
+
+    previous_amount = 0
+    current_amount = 0
+
+    # -----------------------------------------------------
+    # PASS 1: labelled lines
+    # -----------------------------------------------------
+    for line in raw_lines:
+        clean = line.strip()
+
+        # IGN variations
+        ign_match = re.match(
+            r"^(?:player\s*)?(?:ign|in[\s-]*game\s*name)"
+            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if ign_match and not ign:
+            candidate = ign_match.group(1).strip()
+
+            if normalize_name(candidate) not in {
+                "ign",
+                "previousguildgold",
+                "currentguildgold",
+                "dailydonation",
+                "golddonated",
+                "donation",
+                "donated",
+            }:
+                ign = candidate
+
+            continue
+
+        # Previous gold variations
+        previous_match = re.match(
+            r"^(?:previous|prev|before)"
+            r"(?:\s+guild)?\s+gold"
+            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if previous_match:
+            previous = previous_match.group(1).strip()
+            previous_amount = _extract_amount_from_text(
+                previous
+            )
+            continue
+
+        # Current gold variations
+        current_match = re.match(
+            r"^(?:current|curr|after)"
+            r"(?:\s+guild)?\s+gold"
+            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if current_match:
+            current = current_match.group(1).strip()
+            current_amount = _extract_amount_from_text(
+                current
+            )
+            continue
+
+        # Donation variations
+        donation_match = re.match(
+            r"^(?:daily\s+donation|gold\s+donated|gold\s+donation|"
+            r"donation|donated|donate)"
+            r"\s*(?:[:=\-]\s*|\s+)(.+?)$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if donation_match and donation_amount <= 0:
+            donation_text = donation_match.group(1).strip()
+            donation_amount = _extract_amount_from_text(
+                donation_text
+            )
+            continue
+
+    # -----------------------------------------------------
+    # PASS 2: tolerate small label typos / missing punctuation
+    # -----------------------------------------------------
+    if not ign:
+        for line in raw_lines:
+            lowered = line.lower()
+
+            if lowered.startswith("ign"):
+                remainder = re.sub(
+                    r"^ign[\s:=\-]*",
+                    "",
+                    line,
+                    flags=re.IGNORECASE
+                ).strip()
+
+                if remainder:
+                    ign = remainder
+                    break
+
+    if previous == "Unknown":
+        for line in raw_lines:
+            lower = line.lower()
+
+            if (
+                ("prev" in lower or "previous" in lower or "before" in lower)
+                and "gold" in lower
+            ):
+                amount = _extract_amount_from_text(
+                    line
+                )
+
+                if amount > 0:
+                    previous_amount = amount
+                    previous = format_amount(
+                        amount
+                    )
+                    break
+
+    if current == "Unknown":
+        for line in raw_lines:
+            lower = line.lower()
+
+            if (
+                ("curr" in lower or "current" in lower or "after" in lower)
+                and "gold" in lower
+            ):
+                amount = _extract_amount_from_text(
+                    line
+                )
+
+                if amount > 0:
+                    current_amount = amount
+                    current = format_amount(
+                        amount
+                    )
+                    break
 
     if donation_amount <= 0:
+        for line in raw_lines:
+            lower = line.lower()
+
+            if (
+                "donat" in lower
+                or "gold given" in lower
+                or "gold give" in lower
+            ):
+                amount = _extract_amount_from_text(
+                    line
+                )
+
+                if amount > 0:
+                    donation_amount = amount
+                    donation_text = format_amount(
+                        amount
+                    )
+                    break
+
+    # -----------------------------------------------------
+    # PASS 3: infer missing donation from gold difference
+    # -----------------------------------------------------
+    if (
+        donation_amount <= 0
+        and previous_amount > 0
+        and current_amount > 0
+        and current_amount > previous_amount
+    ):
+        donation_amount = (
+            current_amount
+            - previous_amount
+        )
+
+        donation_text = format_amount(
+            donation_amount
+        )
+
+    # -----------------------------------------------------
+    # PASS 4: infer IGN only when the message is clearly
+    # donation-shaped. This avoids treating normal chat as a log.
+    # -----------------------------------------------------
+    if (
+        not ign
+        and donation_amount > 0
+        and (
+            previous_amount > 0
+            or current_amount > 0
+            or looks_like_donation_message(text)
+        )
+    ):
+        for line in raw_lines:
+            lower = line.lower()
+
+            if any(
+                word in lower
+                for word in (
+                    "gold",
+                    "donat",
+                    "previous",
+                    "current",
+                    "before",
+                    "after",
+                )
+            ):
+                continue
+
+            candidate = line.strip("`*_- ")
+
+            # Roblox/display-style name safety.
+            if re.fullmatch(
+                r"[A-Za-z0-9_ .\-]{2,32}",
+                candidate
+            ):
+                ign = candidate
+                break
+
+    # -----------------------------------------------------
+    # FINAL VALIDATION
+    # -----------------------------------------------------
+    if not ign or donation_amount <= 0:
+        return None
+
+    if normalize_name(ign) in {
+        "ign",
+        "previousguildgold",
+        "currentguildgold",
+        "dailydonation",
+        "golddonated",
+        "golddonation",
+        "donation",
+        "donated",
+        "donate",
+    }:
         return None
 
     return {
-        "ign": ign,
+        "ign": ign.strip(),
         "previous": previous,
         "current": current,
-        "donation_text": donation_text,
+        "donation_text": (
+            donation_text
+            or format_amount(
+                donation_amount
+            )
+        ),
         "donation_amount": donation_amount,
     }
-
-
-def get_member_names(member):
-    names = set()
-
-    if member.name:
-        names.add(normalize_name(member.name))
-
-    if member.display_name:
-        names.add(normalize_name(member.display_name))
-
-    if member.global_name:
-        names.add(normalize_name(member.global_name))
-
-    return {name for name in names if name}
-
-
-def names_match(ign, member):
-    ign_key = normalize_name(ign)
-
-    if not ign_key:
-        return False
-
-    member_names = get_member_names(member)
-
-    if ign_key in member_names:
-        return True
-
-    # Conservative partial matching only.
-    if len(ign_key) >= 4:
-        for discord_name in member_names:
-            if discord_name.startswith(ign_key):
-                return True
-
-            if len(discord_name) >= 4 and ign_key.startswith(discord_name):
-                return True
-
-    return False
-
 
 
 # =========================================================
@@ -627,7 +904,13 @@ def get_credit_balance(guild_name, ign_key):
     return row[0] if row else 0
 
 
-def set_credit_balance(guild_name, ign_key, display_ign, balance):
+def set_credit_balance(
+    guild_name,
+    ign_key,
+    display_ign,
+    balance,
+    commit=True
+):
     cursor.execute("""
     INSERT INTO donation_credit
     (
@@ -647,10 +930,17 @@ def set_credit_balance(guild_name, ign_key, display_ign, balance):
         display_ign,
         balance,
     ))
-    db.commit()
+
+    if commit:
+        db.commit()
 
 
-def add_coverage(guild_name, ign_key, display_ign, covered_day):
+def add_coverage(
+    guild_name,
+    ign_key,
+    display_ign,
+    covered_day
+):
     cursor.execute("""
     INSERT OR IGNORE INTO donation_coverage
     (
@@ -666,23 +956,45 @@ def add_coverage(guild_name, ign_key, display_ign, covered_day):
         display_ign,
         covered_day,
     ))
-    db.commit()
 
 
-def apply_credit(guild_name, ign, amount, start_day):
-    ign_key = normalize_name(ign)
-    balance = get_credit_balance(guild_name, ign_key) + amount
-    requirement = daily_requirement(guild_name)
+def apply_credit(
+    guild_name,
+    ign,
+    amount,
+    start_day,
+    commit=True
+):
+    ign_key = normalize_name(
+        ign
+    )
 
-    check_date = date.fromisoformat(start_day)
+    balance = (
+        get_credit_balance(
+            guild_name,
+            ign_key
+        )
+        + amount
+    )
+
+    requirement = daily_requirement(
+        guild_name
+    )
+
+    check_date = date.fromisoformat(
+        start_day
+    )
 
     while balance >= requirement:
+
         while is_day_covered(
             guild_name,
             ign_key,
             check_date.isoformat()
         ):
-            check_date += timedelta(days=1)
+            check_date += timedelta(
+                days=1
+            )
 
         add_coverage(
             guild_name,
@@ -692,14 +1004,21 @@ def apply_credit(guild_name, ign, amount, start_day):
         )
 
         balance -= requirement
-        check_date += timedelta(days=1)
+
+        check_date += timedelta(
+            days=1
+        )
 
     set_credit_balance(
         guild_name,
         ign_key,
         ign,
-        balance
+        balance,
+        commit=False,
     )
+
+    if commit:
+        db.commit()
 
     return balance
 
@@ -900,7 +1219,9 @@ def save_donation(
     message_id,
     channel_id
 ):
-    if message_already_logged(message_id):
+    if message_already_logged(
+        message_id
+    ):
         return None
 
     cursor.execute("""
@@ -934,20 +1255,23 @@ def save_donation(
     ))
 
     donation_id = cursor.lastrowid
-    db.commit()
 
     apply_credit(
         guild_name,
         ign,
         donation,
         donation_day,
+        commit=False,
     )
 
     cursor.execute("""
     INSERT OR IGNORE INTO credit_processed
     (donation_id)
     VALUES (?)
-    """, (donation_id,))
+    """, (
+        donation_id,
+    ))
+
     db.commit()
 
     return donation_id
@@ -1586,6 +1910,9 @@ bot = DonationBot(
     intents=intents,
 )
 
+# Prevent live logs, sync, and commands from writing to SQLite at the same time.
+db_write_lock = asyncio.Lock()
+
 
 # =========================================================
 # CHOICES
@@ -1678,39 +2005,41 @@ async def process_donation_message(
         message
     )
 
-    if imported:
-        existing_id = (
-            find_old_unlinked_donation(
-                guild_name,
-                ign,
-                previous,
-                current,
-                donation_amount,
-                donation_day,
+    async with db_write_lock:
+
+        if imported:
+            existing_id = (
+                find_old_unlinked_donation(
+                    guild_name,
+                    ign,
+                    previous,
+                    current,
+                    donation_amount,
+                    donation_day,
+                )
             )
+
+            if existing_id:
+                link_message_to_existing_donation(
+                    existing_id,
+                    message.id,
+                    message.channel.id,
+                )
+                return "linked"
+
+        donation_id = save_donation(
+            guild_name=guild_name,
+            ign=ign,
+            previous=previous,
+            current=current,
+            donation=donation_amount,
+            logged_by=message.author.display_name,
+            logged_by_id=message.author.id,
+            timestamp=timestamp,
+            donation_day=donation_day,
+            message_id=message.id,
+            channel_id=message.channel.id,
         )
-
-        if existing_id:
-            link_message_to_existing_donation(
-                existing_id,
-                message.id,
-                message.channel.id,
-            )
-            return "linked"
-
-    donation_id = save_donation(
-        guild_name=guild_name,
-        ign=ign,
-        previous=previous,
-        current=current,
-        donation=donation_amount,
-        logged_by=message.author.display_name,
-        logged_by_id=message.author.id,
-        timestamp=timestamp,
-        donation_day=donation_day,
-        message_id=message.id,
-        channel_id=message.channel.id,
-    )
 
     if donation_id is None:
         return "duplicate"
@@ -1751,7 +2080,9 @@ async def process_donation_message(
 
 @bot.event
 async def on_message(message):
-    await bot.process_commands(message)
+    await bot.process_commands(
+        message
+    )
 
     if message.author.bot:
         return
@@ -1760,13 +2091,51 @@ async def on_message(message):
         return
 
     try:
-        await process_donation_message(
+        result = await process_donation_message(
             message,
             imported=False,
         )
+
+        if result == "saved":
+            try:
+                await message.add_reaction(
+                    "✅"
+                )
+            except discord.HTTPException:
+                pass
+
+        elif (
+            result == "invalid"
+            and looks_like_donation_message(
+                message.content
+            )
+        ):
+            try:
+                await message.add_reaction(
+                    "⚠️"
+                )
+            except discord.HTTPException:
+                pass
+
+            try:
+                await message.reply(
+                    "⚠️ **Donation Not Logged**\n"
+                    "I could tell this looks like a donation log, "
+                    "but I still couldn't safely find both the "
+                    "**player IGN** and **donation amount**.\n\n"
+                    "Small formatting mistakes are okay — you can use "
+                    "`IGN`, `Gold donated`, `Daily Donation`, "
+                    "`Previous/Current Gold`, etc.",
+                    mention_author=False,
+                    delete_after=30,
+                )
+            except discord.HTTPException:
+                pass
+
     except Exception as exc:
         print(
-            f"LIVE DONATION ERROR: {repr(exc)}"
+            f"LIVE DONATION ERROR: "
+            f"{repr(exc)}"
         )
 
 
@@ -2698,6 +3067,11 @@ async def syncoldlogs(
 
         for message in messages:
             stats["scanned"] += 1
+
+            # Keep Discord heartbeats/interactions responsive
+            # while scanning large channel histories.
+            if stats["scanned"] % 25 == 0:
+                await asyncio.sleep(0)
 
             if not parse_donation_message(
                 message.content
