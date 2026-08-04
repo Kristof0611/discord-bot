@@ -3720,6 +3720,252 @@ async def cleanjunklogs(
     )
 
 
+
+# =========================================================
+# MESSAGE-ID DONATION TOOLS
+# =========================================================
+
+@bot.tree.command(
+    name="checkmessage",
+    description="Check whether a Discord donation message is already logged"
+)
+@app_commands.describe(
+    message_id="Discord message ID to check"
+)
+async def checkmessage(
+    interaction: discord.Interaction,
+    message_id: str,
+):
+    message_id = message_id.strip()
+
+    if not message_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Please enter a valid Discord message ID.",
+            ephemeral=True,
+        )
+        return
+
+    cursor.execute("""
+    SELECT
+        id,
+        guild,
+        ign,
+        donation,
+        day,
+        channel_id
+    FROM donations
+    WHERE message_id=?
+    ORDER BY id DESC
+    LIMIT 1
+    """, (
+        message_id,
+    ))
+
+    row = cursor.fetchone()
+
+    if not row:
+        await interaction.response.send_message(
+            view=simple_info_view(
+                "🔎 Donation Message Check",
+                (
+                    f"**Message ID:** `{message_id}`\n"
+                    f"**Status:** ❌ Not Logged\n\n"
+                    f"Use `/rescanmessage` if this is a donation "
+                    f"message that should have been recorded."
+                ),
+                discord.Colour.orange(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    (
+        donation_id,
+        guild_name,
+        ign,
+        donation,
+        donation_day,
+        channel_id,
+    ) = row
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "🔎 Donation Message Check",
+            (
+                f"**Message ID:** `{message_id}`\n"
+                f"**Status:** ✅ Logged\n\n"
+                f"**Guild:** {guild_name}\n"
+                f"**IGN:** {ign}\n"
+                f"**Donation:** {format_amount(donation)}\n"
+                f"**Date:** {donation_day}\n"
+                f"**Database ID:** #{donation_id}\n"
+                f"**Channel ID:** `{channel_id}`"
+            ),
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="rescanmessage",
+    description="Find one Discord message by ID and try to import its donation"
+)
+@app_commands.describe(
+    message_id="Discord message ID to rescan"
+)
+async def rescanmessage(
+    interaction: discord.Interaction,
+    message_id: str,
+):
+    message_id = message_id.strip()
+
+    if not message_id.isdigit():
+        await interaction.response.send_message(
+            "❌ Please enter a valid Discord message ID.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    # Never duplicate a message that is already saved.
+    if message_already_logged(
+        message_id
+    ):
+        await interaction.followup.send(
+            view=simple_info_view(
+                "🔁 Message Rescan",
+                (
+                    f"**Message ID:** `{message_id}`\n"
+                    f"**Status:** ✅ Already Logged\n\n"
+                    f"No duplicate donation was created."
+                ),
+                discord.Colour.green(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    target_message = None
+
+    # Search only configured donation channels.
+    for channel_id in GUILD_CHANNELS:
+        channel = bot.get_channel(
+            channel_id
+        )
+
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(
+                    channel_id
+                )
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                continue
+
+        try:
+            target_message = await channel.fetch_message(
+                int(message_id)
+            )
+            break
+
+        except discord.NotFound:
+            continue
+
+        except (
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            continue
+
+    if target_message is None:
+        await interaction.followup.send(
+            view=simple_info_view(
+                "🔁 Message Rescan",
+                (
+                    f"**Message ID:** `{message_id}`\n"
+                    f"**Status:** ❌ Message Not Found\n\n"
+                    f"The bot couldn't find that message in any "
+                    f"configured donation channel."
+                ),
+                discord.Colour.red(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    result = await process_donation_message(
+        target_message,
+        imported=True,
+    )
+
+    if result in (
+        "saved",
+        "linked",
+        "duplicate",
+    ):
+        status_text = {
+            "saved": "✅ Imported",
+            "linked": "✅ Linked to Existing Donation",
+            "duplicate": "✅ Already Logged",
+        }.get(
+            result,
+            "✅ Processed",
+        )
+
+        await interaction.followup.send(
+            view=simple_info_view(
+                "🔁 Message Rescan",
+                (
+                    f"**Message ID:** `{message_id}`\n"
+                    f"**Status:** {status_text}\n\n"
+                    f"The message was processed without creating "
+                    f"a duplicate donation."
+                ),
+                discord.Colour.green(),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    parsed = parse_donation_message(
+        target_message.content
+    )
+
+    if parsed is None:
+        details = (
+            "The message was found, but the flexible parser "
+            "still couldn't safely identify both an IGN and "
+            "a donation amount."
+        )
+    else:
+        details = (
+            f"Parser found **{parsed['ign']}** donating "
+            f"**{format_amount(parsed['donation_amount'])}**, "
+            f"but the message still wasn't imported."
+        )
+
+    await interaction.followup.send(
+        view=simple_info_view(
+            "🔁 Message Rescan",
+            (
+                f"**Message ID:** `{message_id}`\n"
+                f"**Status:** ⚠️ Not Imported\n\n"
+                f"{details}"
+            ),
+            discord.Colour.orange(),
+        ),
+        ephemeral=True,
+    )
+
+
 # =========================================================
 # AUTOMATIC REMINDER + DAILY REPORT
 # =========================================================
