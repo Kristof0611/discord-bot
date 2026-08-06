@@ -2319,31 +2319,41 @@ class DonationBot(commands.Bot):
             id=SERVER_ID
         )
 
-        # Clear stale server slash commands first.
+        # 1) Remove stale server-specific commands first.
         self.tree.clear_commands(
             guild=guild_obj
         )
-
         await self.tree.sync(
             guild=guild_obj
         )
 
-        # Copy only the commands that currently exist in this file.
+        # 2) Copy every CURRENT command in this file to the server.
         self.tree.copy_global_to(
             guild=guild_obj
         )
 
+        # 3) Delete OLD GLOBAL commands from Discord.
+        # This is what removes the duplicate /donationstatus
+        # that still only shows Guild 1-9.
+        self.tree.clear_commands(
+            guild=None
+        )
+        await self.tree.sync()
+
+        # 4) Sync only the fresh server commands.
         synced = await self.tree.sync(
             guild=guild_obj
         )
 
         print(
-            f"Synced {len(synced)} commands "
-            f"to server {SERVER_ID}"
+            f"Synced {len(synced)} server commands "
+            f"to {SERVER_ID}"
         )
-
         print(
-            "Slash commands force-refreshed."
+            "Old global slash commands cleared."
+        )
+        print(
+            "Fresh server slash commands synced."
         )
 
         automation_loop.start()
