@@ -54,6 +54,7 @@ GUILD_CHANNELS = {
     1532940571415679067: "Guild 8",
     1533320919500455996: "Guild 9",
     1533793502410965062: "Guild 10",
+    1534837437631561809: "Guild 11",
 }
 
 GUILD_ROLES = {
@@ -67,6 +68,7 @@ GUILD_ROLES = {
     "Guild 8": 1532934229854257332,
     "Guild 9": 1533320139393601626,
     "Guild 10": 1533793609135034488,
+    "Guild 11": 1534832842083926116,
 }
 
 
@@ -2317,9 +2319,7 @@ class DonationBot(commands.Bot):
             id=SERVER_ID
         )
 
-        # Force-refresh the server command list.
-        # This removes stale cached slash commands first,
-        # then installs every command currently in this file.
+        # Clear stale server slash commands first.
         self.tree.clear_commands(
             guild=guild_obj
         )
@@ -2328,6 +2328,7 @@ class DonationBot(commands.Bot):
             guild=guild_obj
         )
 
+        # Copy only the commands that currently exist in this file.
         self.tree.copy_global_to(
             guild=guild_obj
         )
@@ -2366,7 +2367,7 @@ GUILD_CHOICES = [
         name=f"Guild {i}",
         value=f"Guild {i}",
     )
-    for i in range(1, 11)
+    for i in range(1, 12)
 ]
 
 SYNC_GUILD_CHOICES = [
@@ -2401,6 +2402,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     print(f"Database: {DB_PATH}")
     print("Guild 10 enabled.")
+    print("Guild 11 enabled.")
 
 
 # =========================================================
