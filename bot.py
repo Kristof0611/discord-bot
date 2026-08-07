@@ -239,6 +239,15 @@ for guild_name in GUILD_ROLES:
 db.commit()
 
 
+# Add DM reminder setting to older databases if needed.
+if not column_exists("guild_settings", "dm_reminder_enabled"):
+    cursor.execute("""
+    ALTER TABLE guild_settings
+    ADD COLUMN dm_reminder_enabled INTEGER NOT NULL DEFAULT 0
+    """)
+    db.commit()
+
+
 # =========================================================
 # TIME
 # =========================================================
@@ -1283,7 +1292,8 @@ def get_guild_setting(guild_name):
         reminder_hour,
         reminder_minute,
         report_hour,
-        report_minute
+        report_minute,
+        dm_reminder_enabled
     FROM guild_settings
     WHERE guild=?
     """, (guild_name,))
@@ -1300,6 +1310,7 @@ def get_guild_setting(guild_name):
             "reminder_minute": DEFAULT_REMINDER_MINUTE,
             "report_hour": DEFAULT_REPORT_HOUR,
             "report_minute": DEFAULT_REPORT_MINUTE,
+            "dm_reminder_enabled": False,
         }
 
     return {
@@ -1311,6 +1322,7 @@ def get_guild_setting(guild_name):
         "reminder_minute": row[5],
         "report_hour": row[6],
         "report_minute": row[7],
+        "dm_reminder_enabled": bool(row[8]),
     }
 
 
@@ -3319,6 +3331,7 @@ async def removedonation(
     daily_requirement_value="Optional new requirement, e.g. 100K",
     reminder="Enable/disable automatic reminder",
     daily_report="Enable/disable automatic daily report",
+    dm_reminder="Enable/disable DM reminders to missing members",
     report_channel="Where reminders/reports are posted",
 )
 @app_commands.choices(
@@ -3330,6 +3343,7 @@ async def guildsettings(
     daily_requirement_value: str | None = None,
     reminder: bool | None = None,
     daily_report: bool | None = None,
+    dm_reminder: bool | None = None,
     report_channel: discord.TextChannel | None = None,
 ):
     if not interaction.user.guild_permissions.manage_guild:
@@ -3374,6 +3388,12 @@ async def guildsettings(
         else int(current["daily_report_enabled"])
     )
 
+    dm_reminder_value = (
+        int(dm_reminder)
+        if dm_reminder is not None
+        else int(current.get("dm_reminder_enabled", False))
+    )
+
     channel_id = (
         str(report_channel.id)
         if report_channel
@@ -3386,12 +3406,14 @@ async def guildsettings(
         daily_requirement=?,
         reminder_enabled=?,
         daily_report_enabled=?,
+        dm_reminder_enabled=?,
         report_channel_id=?
     WHERE guild=?
     """, (
         requirement,
         reminder_value,
         report_value,
+        dm_reminder_value,
         channel_id,
         guild_name,
     ))
@@ -3411,6 +3433,9 @@ async def guildsettings(
         f"### 📋 Daily Report\n"
         f"**{'ON' if updated['daily_report_enabled'] else 'OFF'}** "
         f"• 12:05 AM PH\n"
+        f"### 💌 DM Reminder\n"
+        f"**{'ON' if updated.get('dm_reminder_enabled', False) else 'OFF'}** "
+        f"• 8:00 PM PH\n"
         f"### 📢 Report Channel\n"
         f"<#{updated['report_channel_id']}>\n\n"
         f"-# Changing the daily requirement affects how future/rebuilt coverage is calculated."
@@ -4458,6 +4483,48 @@ async def fixcoverage(interaction: discord.Interaction):
 
 
 # =========================================================
+# DM REMINDERS
+# =========================================================
+
+async def send_missing_dm_reminders(
+    guild_name,
+    missing_members,
+    reminder_day,
+):
+    sent = 0
+    failed = 0
+
+    for member in missing_members:
+        run_key = (
+            f"dmreminder:{guild_name}:"
+            f"{reminder_day}:{member.id}"
+        )
+
+        if automation_done(run_key):
+            continue
+
+        try:
+            await member.send(
+                f"💰 **{guild_name} Donation Reminder**\n\n"
+                f"You are still missing today's "
+                f"**{format_amount(daily_requirement(guild_name))}** "
+                f"guild donation.\n"
+                f"Please donate before the **12:00 AM Philippines time reset**.\n\n"
+                f"If you already paid in advance and think this is wrong, "
+                f"contact a Leader or Co-Leader."
+            )
+            sent += 1
+
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+        mark_automation_done(run_key)
+        await asyncio.sleep(0.25)
+
+    return sent, failed
+
+
+# =========================================================
 # AUTOMATIC REMINDER + DAILY REPORT
 # =========================================================
 
@@ -4601,6 +4668,16 @@ async def automation_loop():
                             unlinked,
                         ) = status
 
+                        dm_sent = 0
+                        dm_failed = 0
+
+                        if settings.get("dm_reminder_enabled", False):
+                            dm_sent, dm_failed = await send_missing_dm_reminders(
+                                guild_name,
+                                missing_members,
+                                now.date().isoformat(),
+                            )
+
                         if missing_members:
                             missing_text = "\n".join(
                                 f"🔴 {m.mention}"
@@ -4617,6 +4694,8 @@ async def automation_loop():
                             f"member(s) are still missing today's "
                             f"{format_amount(daily_requirement(guild_name))}.\n\n"
                             f"{missing_text}\n\n"
+                            f"💌 DM reminders sent: **{dm_sent}**"
+                            f" • Failed/closed DMs: **{dm_failed}**\n\n"
                             f"-# Daily reset: 12:00 AM Philippines Time"
                         )
 
