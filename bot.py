@@ -26,6 +26,7 @@ TRACKER_CHANNEL_ID = 1532339634829267149
 PH_TZ = ZoneInfo("Asia/Manila")
 
 DEFAULT_DAILY_REQUIREMENT = 100_000
+MAX_ADVANCE_DAYS = 365
 
 # Roblox roster managers
 LEADER_ROLE_ID = 1530461465209995447
@@ -1410,36 +1411,29 @@ def apply_credit(
     start_day,
     commit=True
 ):
-    ign_key = normalize_name(
-        ign
-    )
+    ign_key = normalize_name(ign)
+    balance = get_credit_balance(guild_name, ign_key) + amount
+    requirement = daily_requirement(guild_name)
+    check_date = date.fromisoformat(start_day)
 
-    balance = (
-        get_credit_balance(
-            guild_name,
-            ign_key
-        )
-        + amount
-    )
+    days_added = 0
 
-    requirement = daily_requirement(
-        guild_name
-    )
-
-    check_date = date.fromisoformat(
-        start_day
-    )
-
-    while balance >= requirement:
+    while balance >= requirement and days_added < MAX_ADVANCE_DAYS:
+        safety_hops = 0
 
         while is_day_covered(
             guild_name,
             ign_key,
             check_date.isoformat()
         ):
-            check_date += timedelta(
-                days=1
-            )
+            check_date += timedelta(days=1)
+            safety_hops += 1
+
+            if safety_hops >= MAX_ADVANCE_DAYS:
+                break
+
+        if safety_hops >= MAX_ADVANCE_DAYS:
+            break
 
         add_coverage(
             guild_name,
@@ -1449,10 +1443,8 @@ def apply_credit(
         )
 
         balance -= requirement
-
-        check_date += timedelta(
-            days=1
-        )
+        days_added += 1
+        check_date += timedelta(days=1)
 
     set_credit_balance(
         guild_name,
@@ -1468,7 +1460,11 @@ def apply_credit(
     return balance
 
 
-def covered_through_from_day(guild_name, ign_key, start_day):
+def covered_through_from_day(
+    guild_name,
+    ign_key,
+    start_day
+):
     current = date.fromisoformat(start_day)
 
     if not is_day_covered(
@@ -1479,13 +1475,22 @@ def covered_through_from_day(guild_name, ign_key, start_day):
         return None
 
     last = current
+    checked = 0
 
-    while is_day_covered(
-        guild_name,
-        ign_key,
-        current.isoformat()
+    while (
+        checked < MAX_ADVANCE_DAYS
+        and is_day_covered(
+            guild_name,
+            ign_key,
+            current.isoformat()
+        )
     ):
         last = current
+        checked += 1
+
+        if checked >= MAX_ADVANCE_DAYS:
+            break
+
         current += timedelta(days=1)
 
     return last.isoformat()
@@ -2301,6 +2306,42 @@ def simple_info_view(
             body,
         ],
     )
+
+
+# =========================================================
+# COVERAGE REPAIR
+# =========================================================
+
+def rebuild_all_coverage_safely():
+    cursor.execute("DELETE FROM donation_coverage")
+    cursor.execute("DELETE FROM donation_credit")
+    db.commit()
+
+    cursor.execute("""
+    SELECT guild, ign, donation, day
+    FROM donations
+    ORDER BY day ASC, id ASC
+    """)
+
+    for guild_name, ign, amount, donation_day in cursor.fetchall():
+        if not donation_day:
+            continue
+
+        try:
+            apply_credit(
+                guild_name,
+                ign,
+                amount,
+                donation_day,
+                commit=False,
+            )
+        except Exception as exc:
+            print(
+                f"COVERAGE REBUILD SKIP "
+                f"{guild_name} / {ign}: {repr(exc)}"
+            )
+
+    db.commit()
 
 
 # =========================================================
@@ -4367,6 +4408,53 @@ async def rescanmessage(
         ),
         ephemeral=True,
     )
+
+
+# =========================================================
+# /FIXCOVERAGE
+# =========================================================
+
+@bot.tree.command(
+    name="fixcoverage",
+    description="Repair impossible advance-payment coverage dates"
+)
+async def fixcoverage(interaction: discord.Interaction):
+
+    if not can_manage_roblox(interaction.user):
+        await interaction.response.send_message(
+            "❌ Leader, Co-Leader, or Manage Server required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    try:
+        async with db_write_lock:
+            rebuild_all_coverage_safely()
+
+        await interaction.followup.send(
+            view=simple_info_view(
+                "🛠️ Coverage Repair Complete",
+                (
+                    "Coverage was rebuilt from the saved donation logs.\n\n"
+                    f"Maximum advance coverage: **{MAX_ADVANCE_DAYS} days**\n"
+                    "✅ Impossible coverage chains were removed."
+                ),
+                discord.Colour.green(),
+            ),
+            ephemeral=True,
+        )
+
+    except Exception as exc:
+        print(f"FIXCOVERAGE ERROR: {repr(exc)}")
+        await interaction.followup.send(
+            "❌ Coverage repair failed. Check Railway logs.",
+            ephemeral=True,
+        )
 
 
 # =========================================================
