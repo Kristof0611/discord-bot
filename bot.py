@@ -3171,9 +3171,9 @@ async def editdonation(
     message_id: str,
     new_amount: str,
 ):
-    if not interaction.user.guild_permissions.manage_guild:
+    if not can_manage_roblox(interaction.user):
         await interaction.response.send_message(
-            "❌ You need **Manage Server**.",
+            "❌ You need **Leader**, **Co-Leader**, or **Manage Server**.",
             ephemeral=True,
         )
         return
@@ -3255,9 +3255,9 @@ async def removedonation(
     interaction: discord.Interaction,
     message_id: str,
 ):
-    if not interaction.user.guild_permissions.manage_guild:
+    if not can_manage_roblox(interaction.user):
         await interaction.response.send_message(
-            "❌ You need **Manage Server**.",
+            "❌ You need **Leader**, **Co-Leader**, or **Manage Server**.",
             ephemeral=True,
         )
         return
