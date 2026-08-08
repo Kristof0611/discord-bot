@@ -175,10 +175,23 @@ CREATE TABLE IF NOT EXISTS roblox_members (
     roblox_username TEXT NOT NULL,
     added_by_id TEXT,
     added_at TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (guild, discord_user_id),
     UNIQUE (guild, roblox_ign_key)
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS inactive_igns (
+    guild TEXT NOT NULL,
+    ign_key TEXT NOT NULL,
+    display_ign TEXT NOT NULL,
+    reason TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (guild, ign_key)
+)
+""")
+
 
 db.commit()
 
@@ -244,6 +257,15 @@ if not column_exists("guild_settings", "dm_reminder_enabled"):
     cursor.execute("""
     ALTER TABLE guild_settings
     ADD COLUMN dm_reminder_enabled INTEGER NOT NULL DEFAULT 0
+    """)
+    db.commit()
+
+
+# Add active-roster status to older databases if needed.
+if not column_exists("roblox_members", "active"):
+    cursor.execute("""
+    ALTER TABLE roblox_members
+    ADD COLUMN active INTEGER NOT NULL DEFAULT 1
     """)
     db.commit()
 
@@ -1141,7 +1163,9 @@ def upsert_roblox_member(
     roblox_username,
     added_by_id,
 ):
-    ign_key = normalize_name(roblox_ign)
+    ign_key = normalize_name(
+        roblox_ign
+    )
 
     if not ign_key:
         return False, "Invalid Roblox IGN."
@@ -1149,7 +1173,21 @@ def upsert_roblox_member(
     if not roblox_username.strip():
         return False, "Invalid Roblox username."
 
-    # One IGN cannot belong to two Discord users in the same guild.
+    # Read the member's old saved IGN first.
+    cursor.execute("""
+    SELECT
+        roblox_ign_key,
+        roblox_ign
+    FROM roblox_members
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    old_row = cursor.fetchone()
+
+    # One IGN cannot belong to two different Discord users.
     cursor.execute("""
     SELECT discord_user_id
     FROM roblox_members
@@ -1171,6 +1209,18 @@ def upsert_roblox_member(
             "Discord member in this guild."
         )
 
+    # If a Leader corrected the member's IGN, retire the old/wrong
+    # IGN from CURRENT tracking but keep every old donation row.
+    if old_row:
+        old_ign_key, old_ign = old_row
+
+        if old_ign_key != ign_key:
+            mark_ign_inactive(
+                guild_name,
+                old_ign,
+                reason="replaced",
+            )
+
     cursor.execute("""
     INSERT INTO roblox_members
     (
@@ -1180,9 +1230,10 @@ def upsert_roblox_member(
         roblox_ign,
         roblox_username,
         added_by_id,
-        added_at
+        added_at,
+        active
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
 
     ON CONFLICT(guild, discord_user_id)
     DO UPDATE SET
@@ -1190,7 +1241,8 @@ def upsert_roblox_member(
         roblox_ign=excluded.roblox_ign,
         roblox_username=excluded.roblox_username,
         added_by_id=excluded.added_by_id,
-        added_at=excluded.added_at
+        added_at=excluded.added_at,
+        active=1
     """, (
         guild_name,
         str(discord_user_id),
@@ -1202,6 +1254,13 @@ def upsert_roblox_member(
     ))
 
     db.commit()
+
+    # The new/correct IGN is active again.
+    mark_ign_active(
+        guild_name,
+        roblox_ign,
+    )
+
     return True, None
 
 
@@ -1209,8 +1268,31 @@ def remove_roblox_member(
     guild_name,
     discord_user_id,
 ):
+    """
+    Remove from CURRENT tracking only.
+    Donation history and lifetime totals stay untouched.
+    """
     cursor.execute("""
-    DELETE FROM roblox_members
+    SELECT roblox_ign
+    FROM roblox_members
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    row = cursor.fetchone()
+
+    if row:
+        mark_ign_inactive(
+            guild_name,
+            row[0],
+            reason="removed",
+        )
+
+    cursor.execute("""
+    UPDATE roblox_members
+    SET active=0
     WHERE guild=? AND discord_user_id=?
     """, (
         guild_name,
@@ -1218,6 +1300,39 @@ def remove_roblox_member(
     ))
 
     db.commit()
+
+
+def reactivate_roblox_member(
+    guild_name,
+    discord_user_id,
+):
+    cursor.execute("""
+    SELECT roblox_ign
+    FROM roblox_members
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    row = cursor.fetchone()
+
+    cursor.execute("""
+    UPDATE roblox_members
+    SET active=1
+    WHERE guild=? AND discord_user_id=?
+    """, (
+        guild_name,
+        str(discord_user_id),
+    ))
+
+    db.commit()
+
+    if row:
+        mark_ign_active(
+            guild_name,
+            row[0],
+        )
 
 
 def get_roblox_member_by_discord(
@@ -1228,7 +1343,8 @@ def get_roblox_member_by_discord(
     SELECT
         roblox_ign_key,
         roblox_ign,
-        roblox_username
+        roblox_username,
+        active
     FROM roblox_members
     WHERE guild=? AND discord_user_id=?
     """, (
@@ -1248,7 +1364,8 @@ def get_roblox_member_by_ign(
         discord_user_id,
         roblox_ign_key,
         roblox_ign,
-        roblox_username
+        roblox_username,
+        active
     FROM roblox_members
     WHERE guild=? AND roblox_ign_key=?
     """, (
@@ -1267,7 +1384,8 @@ def get_roblox_roster(
         discord_user_id,
         roblox_ign,
         roblox_username,
-        roblox_ign_key
+        roblox_ign_key,
+        active
     FROM roblox_members
     WHERE guild=?
     ORDER BY LOWER(roblox_ign) ASC
@@ -1276,6 +1394,92 @@ def get_roblox_roster(
     ))
 
     return cursor.fetchall()
+
+
+def get_active_roster_discord_ids(
+    guild_name,
+):
+    cursor.execute("""
+    SELECT discord_user_id
+    FROM roblox_members
+    WHERE guild=? AND active=1
+    """, (
+        guild_name,
+    ))
+
+    return {
+        int(row[0])
+        for row in cursor.fetchall()
+    }
+
+
+def mark_ign_inactive(
+    guild_name,
+    ign,
+    reason="removed",
+):
+    ign_key = normalize_name(ign)
+
+    if not ign_key:
+        return
+
+    cursor.execute("""
+    INSERT INTO inactive_igns
+    (
+        guild,
+        ign_key,
+        display_ign,
+        reason,
+        updated_at
+    )
+    VALUES (?, ?, ?, ?, ?)
+
+    ON CONFLICT(guild, ign_key)
+    DO UPDATE SET
+        display_ign=excluded.display_ign,
+        reason=excluded.reason,
+        updated_at=excluded.updated_at
+    """, (
+        guild_name,
+        ign_key,
+        ign,
+        reason,
+        utc_now().isoformat(),
+    ))
+
+    db.commit()
+
+
+def mark_ign_active(
+    guild_name,
+    ign,
+):
+    cursor.execute("""
+    DELETE FROM inactive_igns
+    WHERE guild=? AND ign_key=?
+    """, (
+        guild_name,
+        normalize_name(ign),
+    ))
+
+    db.commit()
+
+
+def is_ign_inactive(
+    guild_name,
+    ign_key,
+):
+    cursor.execute("""
+    SELECT 1
+    FROM inactive_igns
+    WHERE guild=? AND ign_key=?
+    LIMIT 1
+    """, (
+        guild_name,
+        ign_key,
+    ))
+
+    return cursor.fetchone() is not None
 
 
 # =========================================================
@@ -1845,7 +2049,11 @@ def calculate_member_status(
         )
 
         if saved:
-            saved_ign_key, saved_ign, saved_username = saved
+            saved_ign_key, saved_ign, saved_username, saved_active = saved
+
+            if not saved_active:
+                # Kicked/inactive players do not appear in current daily tracking.
+                continue
 
             matched = account_lookup.get(
                 saved_ign_key,
@@ -1927,6 +2135,14 @@ def calculate_member_status(
         if ign_key in matched_keys:
             continue
 
+        # Old/kicked/replaced IGNs keep their historical donations,
+        # but must not appear in current daily status.
+        if is_ign_inactive(
+            guild_name,
+            ign_key,
+        ):
+            continue
+
         # If this IGN exists in the saved Roblox roster,
         # it is linked even when the user does not currently
         # have the guild Discord role.
@@ -1936,7 +2152,10 @@ def calculate_member_status(
         )
 
         if roster_match:
-            continue
+            roster_active = roster_match[-1]
+
+            if roster_active:
+                continue
 
         if any(
             names_match(
@@ -2469,6 +2688,72 @@ async def on_ready():
 
 
 # =========================================================
+# AUTO ROSTER UPDATE FROM DISCORD ROLES
+# =========================================================
+
+@bot.event
+async def on_member_update(
+    before,
+    after,
+):
+    if after.guild.id != SERVER_ID:
+        return
+
+    before_role_ids = {
+        role.id
+        for role in before.roles
+    }
+
+    after_role_ids = {
+        role.id
+        for role in after.roles
+    }
+
+    for guild_name, role_id in GUILD_ROLES.items():
+
+        had_role = (
+            role_id in before_role_ids
+        )
+
+        has_role = (
+            role_id in after_role_ids
+        )
+
+        if had_role == has_role:
+            continue
+
+        saved = get_roblox_member_by_discord(
+            guild_name,
+            after.id,
+        )
+
+        if not saved:
+            continue
+
+        if has_role:
+            reactivate_roblox_member(
+                guild_name,
+                after.id,
+            )
+
+            print(
+                f"Roster auto-reactivated: "
+                f"{guild_name} / {after.id}"
+            )
+
+        else:
+            remove_roblox_member(
+                guild_name,
+                after.id,
+            )
+
+            print(
+                f"Roster auto-deactivated: "
+                f"{guild_name} / {after.id}"
+            )
+
+
+# =========================================================
 # LIVE / OLD LOG PROCESSING
 # =========================================================
 
@@ -2708,6 +2993,25 @@ async def donationstatus(
         if not member.bot
     ]
 
+    # If a saved roster member was deactivated, exclude them from
+    # current daily tracking even if they still temporarily have the Discord role.
+    filtered_members = []
+
+    for member in members:
+        saved = get_roblox_member_by_discord(
+            guild_name,
+            member.id,
+        )
+
+        if saved and not saved[-1]:
+            continue
+
+        filtered_members.append(
+            member
+        )
+
+    members = filtered_members
+
     covered, missing, unlinked = (
         calculate_member_status(
             guild_name,
@@ -2770,6 +3074,15 @@ async def missing(
         member
         for member in role.members
         if not member.bot
+    ]
+
+    members = [
+        member
+        for member in members
+        if not (
+            (saved := get_roblox_member_by_discord(guild_name, member.id))
+            and not saved[-1]
+        )
     ]
 
     _, missing_members, _ = (
@@ -2845,6 +3158,15 @@ async def guildsummary(
         m
         for m in role.members
         if not m.bot
+    ]
+
+    members = [
+        member
+        for member in members
+        if not (
+            (saved := get_roblox_member_by_discord(guild_name, member.id))
+            and not saved[-1]
+        )
     ]
 
     covered, missing_members, unlinked = (
@@ -3795,7 +4117,7 @@ async def myroblox(
         )
         return
 
-    ign_key, roblox_ign, roblox_username = saved
+    ign_key, roblox_ign, roblox_username, active = saved
 
     await interaction.response.send_message(
         view=simple_info_view(
@@ -3803,7 +4125,8 @@ async def myroblox(
             (
                 f"### 🛡️ Guild\n**{guild.value}**\n"
                 f"### 🎮 Roblox IGN\n**{roblox_ign}**\n"
-                f"### 🔎 Roblox Username\n**{roblox_username}**"
+                f"### 🔎 Roblox Username\n**{roblox_username}**\n"
+                f"### 📌 Status\n**{'Active' if active else 'Inactive'}**"
             ),
             discord.Colour.green(),
         ),
@@ -3995,9 +4318,10 @@ async def removeroblox(
         view=simple_info_view(
             "➖ Roblox Member Removed",
             (
-                f"Removed {member.mention} from "
-                f"**{guild.value}**'s saved Roblox roster.\n\n"
-                f"-# Donation history was not deleted."
+                f"{member.mention} was removed from **current daily tracking** "
+                f"for **{guild.value}**.\n\n"
+                f"✅ Old donations, lifetime totals, leaderboard totals, "
+                f"and history were preserved."
             ),
             discord.Colour.red(),
         ),
@@ -4036,12 +4360,17 @@ async def robloxroster(
             roblox_ign,
             roblox_username,
             ign_key,
+            active,
         ) in roster[:60]:
 
+            status_icon = "🟢" if active else "⚫"
+            status_text = "Active" if active else "Inactive"
+
             lines.append(
-                f"👤 <@{discord_user_id}>\n"
+                f"{status_icon} 👤 <@{discord_user_id}>\n"
                 f"└ 🎮 IGN: **{roblox_ign}**\n"
-                f"└ 🔎 User: **{roblox_username}**"
+                f"└ 🔎 User: **{roblox_username}**\n"
+                f"└ 📌 Status: **{status_text}**"
             )
 
         if len(roster) > 60:
@@ -4524,6 +4853,195 @@ async def send_missing_dm_reminders(
     return sent, failed
 
 
+
+# =========================================================
+# /REACTIVATEPLAYER
+# =========================================================
+
+@bot.tree.command(
+    name="reactivateplayer",
+    description="Put an inactive Roblox member back into daily tracking"
+)
+@app_commands.describe(
+    guild="Choose a guild",
+    member="Discord member to reactivate",
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def reactivateplayer(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+    member: discord.Member,
+):
+    if not can_manage_roblox(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "❌ Leader, Co-Leader, or Manage Server required.",
+            ephemeral=True,
+        )
+        return
+
+    saved = get_roblox_member_by_discord(
+        guild.value,
+        member.id,
+    )
+
+    if not saved:
+        await interaction.response.send_message(
+            "❌ That member has no saved Roblox roster entry.",
+            ephemeral=True,
+        )
+        return
+
+    reactivate_roblox_member(
+        guild.value,
+        member.id,
+    )
+
+    await interaction.response.send_message(
+        view=simple_info_view(
+            "✅ Player Reactivated",
+            (
+                f"{member.mention} is active again in "
+                f"**{guild.value}** daily tracking.\\n\\n"
+                f"Their existing donation history was kept."
+            ),
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+
+# =========================================================
+# /SYNCPLAYERS
+# Reconcile saved roster with the current Discord guild role.
+# Does NOT delete donation history.
+# =========================================================
+
+@bot.tree.command(
+    name="syncplayers",
+    description="Update active players from the current Discord guild role"
+)
+@app_commands.describe(
+    guild="Choose a guild"
+)
+@app_commands.choices(
+    guild=GUILD_CHOICES
+)
+async def syncplayers(
+    interaction: discord.Interaction,
+    guild: app_commands.Choice[str],
+):
+    if not can_manage_roblox(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "❌ Leader, Co-Leader, or Manage Server required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    server = interaction.guild
+
+    if server is None:
+        return
+
+    guild_name = guild.value
+    role_id = GUILD_ROLES.get(
+        guild_name
+    )
+
+    role = server.get_role(
+        role_id
+    )
+
+    if role is None:
+        await interaction.followup.send(
+            "❌ Guild role not found.",
+            ephemeral=True,
+        )
+        return
+
+    await ensure_members(
+        server
+    )
+
+    role_member_ids = {
+        member.id
+        for member in role.members
+        if not member.bot
+    }
+
+    cursor.execute("""
+    SELECT
+        discord_user_id,
+        roblox_ign,
+        active
+    FROM roblox_members
+    WHERE guild=?
+    """, (
+        guild_name,
+    ))
+
+    rows = cursor.fetchall()
+
+    deactivated = 0
+    reactivated = 0
+
+    for (
+        discord_user_id,
+        roblox_ign,
+        active,
+    ) in rows:
+
+        user_id = int(
+            discord_user_id
+        )
+
+        should_be_active = (
+            user_id in role_member_ids
+        )
+
+        if should_be_active and not active:
+            reactivate_roblox_member(
+                guild_name,
+                user_id,
+            )
+            reactivated += 1
+
+        elif (
+            not should_be_active
+            and active
+        ):
+            remove_roblox_member(
+                guild_name,
+                user_id,
+            )
+            deactivated += 1
+
+    await interaction.followup.send(
+        view=simple_info_view(
+            "🔄 Player Roster Updated",
+            (
+                f"**Guild:** {guild_name}\n"
+                f"**Removed from daily tracking:** {deactivated}\n"
+                f"**Reactivated:** {reactivated}\n\n"
+                f"✅ Old donation history and lifetime totals were preserved."
+            ),
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
 # =========================================================
 # AUTOMATIC REMINDER + DAILY REPORT
 # =========================================================
@@ -4606,6 +5124,15 @@ async def build_daily_status_for_day(
         m
         for m in role.members
         if not m.bot
+    ]
+
+    members = [
+        member
+        for member in members
+        if not (
+            (saved := get_roblox_member_by_discord(guild_name, member.id))
+            and not saved[-1]
+        )
     ]
 
     covered, missing_members, unlinked = (
