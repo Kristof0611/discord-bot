@@ -1387,7 +1387,7 @@ def get_roblox_roster(
         roblox_ign_key,
         active
     FROM roblox_members
-    WHERE guild=?
+    WHERE guild=? AND active=1
     ORDER BY LOWER(roblox_ign) ASC
     """, (
         guild_name,
@@ -2751,6 +2751,39 @@ async def on_member_update(
                 f"Roster auto-deactivated: "
                 f"{guild_name} / {after.id}"
             )
+
+
+# =========================================================
+# AUTO DEACTIVATE WHEN MEMBER LEAVES SERVER
+# =========================================================
+
+@bot.event
+async def on_member_remove(member):
+    if member.guild.id != SERVER_ID:
+        return
+
+    for guild_name in GUILD_ROLES:
+        saved = get_roblox_member_by_discord(
+            guild_name,
+            member.id,
+        )
+
+        if not saved:
+            continue
+
+        # Last tuple item is active flag.
+        if not saved[-1]:
+            continue
+
+        remove_roblox_member(
+            guild_name,
+            member.id,
+        )
+
+        print(
+            f"Roster auto-deactivated on server leave: "
+            f"{guild_name} / {member.id}"
+        )
 
 
 # =========================================================
@@ -4318,8 +4351,8 @@ async def removeroblox(
         view=simple_info_view(
             "➖ Roblox Member Removed",
             (
-                f"{member.mention} was removed from **current daily tracking** "
-                f"for **{guild.value}**.\n\n"
+                f"{member.mention} was removed from the **current roster** "
+                f"and daily tracking for **{guild.value}**.\n\n"
                 f"✅ Old donations, lifetime totals, leaderboard totals, "
                 f"and history were preserved."
             ),
@@ -4363,14 +4396,10 @@ async def robloxroster(
             active,
         ) in roster[:60]:
 
-            status_icon = "🟢" if active else "⚫"
-            status_text = "Active" if active else "Inactive"
-
             lines.append(
-                f"{status_icon} 👤 <@{discord_user_id}>\n"
+                f"🟢 👤 <@{discord_user_id}>\n"
                 f"└ 🎮 IGN: **{roblox_ign}**\n"
-                f"└ 🔎 User: **{roblox_username}**\n"
-                f"└ 📌 Status: **{status_text}**"
+                f"└ 🔎 User: **{roblox_username}**"
             )
 
         if len(roster) > 60:
@@ -5035,6 +5064,107 @@ async def syncplayers(
                 f"**Removed from daily tracking:** {deactivated}\n"
                 f"**Reactivated:** {reactivated}\n\n"
                 f"✅ Old donation history and lifetime totals were preserved."
+            ),
+            discord.Colour.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+
+# =========================================================
+# /PRUNEROSTER
+# Clean current active roster against actual Discord membership/roles.
+# Historical donations remain untouched.
+# =========================================================
+
+@bot.tree.command(
+    name="pruneroster",
+    description="Remove kicked/left players from current roster without deleting history"
+)
+async def pruneroster(
+    interaction: discord.Interaction,
+):
+    if not can_manage_roblox(interaction.user):
+        await interaction.response.send_message(
+            "❌ Leader, Co-Leader, or Manage Server required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        thinking=True,
+        ephemeral=True,
+    )
+
+    server = interaction.guild
+
+    if server is None:
+        return
+
+    await ensure_members(server)
+
+    total_deactivated = 0
+    guild_lines = []
+
+    for guild_name, role_id in GUILD_ROLES.items():
+        role = server.get_role(role_id)
+
+        if role is None:
+            guild_lines.append(
+                f"⚠️ **{guild_name}** — role not found"
+            )
+            continue
+
+        active_role_member_ids = {
+            member.id
+            for member in role.members
+            if not member.bot
+        }
+
+        cursor.execute("""
+        SELECT discord_user_id, active
+        FROM roblox_members
+        WHERE guild=?
+        """, (
+            guild_name,
+        ))
+
+        rows = cursor.fetchall()
+        deactivated = 0
+
+        for discord_user_id, active in rows:
+            if not active:
+                continue
+
+            user_id = int(discord_user_id)
+            member = server.get_member(user_id)
+
+            if (
+                member is None
+                or user_id not in active_role_member_ids
+            ):
+                remove_roblox_member(
+                    guild_name,
+                    user_id,
+                )
+                deactivated += 1
+                total_deactivated += 1
+
+        guild_lines.append(
+            f"**{guild_name}** — "
+            f"{deactivated} removed from current roster"
+        )
+
+    await interaction.followup.send(
+        view=simple_info_view(
+            "🧹 Current Roster Cleaned",
+            (
+                f"**Total removed from current tracking:** "
+                f"{total_deactivated}\\n\\n"
+                + "\\n".join(guild_lines)
+                + "\\n\\n✅ Historical donations, lifetime totals, "
+                  "leaderboards, and history were preserved."
             ),
             discord.Colour.green(),
         ),
