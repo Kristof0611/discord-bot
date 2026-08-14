@@ -25,7 +25,7 @@ TRACKER_CHANNEL_ID = 1532339634829267149
 
 PH_TZ = ZoneInfo("Asia/Manila")
 
-DEFAULT_DAILY_REQUIREMENT = 100_000
+DEFAULT_DAILY_REQUIREMENT = 50_000
 MAX_ADVANCE_DAYS = 365
 
 # Roblox roster managers
@@ -268,6 +268,17 @@ if not column_exists("roblox_members", "active"):
     ADD COLUMN active INTEGER NOT NULL DEFAULT 1
     """)
     db.commit()
+
+
+# MIGRATION_50K_DAILY_REQUIREMENT_V1
+# Change existing guild requirements from the old 100K default to 50K.
+# Existing advance-payment coverage dates are intentionally NOT rebuilt.
+cursor.execute("""
+UPDATE guild_settings
+SET daily_requirement=50000
+WHERE daily_requirement=100000
+""")
+db.commit()
 
 
 # =========================================================
@@ -2328,7 +2339,7 @@ def tracker_view(
         f"### 📝 Logged By\n{author.mention}\n"
         f"### 🕒 Original Time\n"
         f"<t:{timestamp}:F> • <t:{timestamp}:R>\n\n"
-        f"-# 100K = 1 day • Daily reset: 12:00 AM Philippines Time"
+        f"-# 50K = 1 day • Daily reset: 12:00 AM Philippines Time"
     )
 
     return make_view(
